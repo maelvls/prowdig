@@ -1,8 +1,8 @@
 # Prow dig
 
 Dig into Prow logs of cert-manager to find which test cases have a timeout too
-high compared to the passed runs of that test. You must have read access to the
-bucket `gs://jetstack-logs` in order to run this prowdig.
+high compared to the "passed" runs of that test. You must have read access to the
+bucket `gs://jetstack-logs` in order to run prowdig.
 
 ![Screenshot from 2021-12-18 22-49-26](https://user-images.githubusercontent.com/2195781/146656953-6c4f18f3-d273-472d-bac1-e7e4232cea29.png)
 
