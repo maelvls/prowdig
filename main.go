@@ -145,9 +145,9 @@ func run() error {
 
 			// Load from cache if it exists.
 			var bytes []byte
-			cachedFile := os.Getenv("HOME") + "/.cache/cmtestlenght/" + file.Name
+			cachedFile := os.Getenv("HOME") + "/.cache/prowdig/" + file.Name
 			if _, err := os.Stat(cachedFile); err == nil {
-				bytes, err = ioutil.ReadFile(os.Getenv("HOME") + "/.cache/cmtestlenght/" + file.Name)
+				bytes, err = ioutil.ReadFile(os.Getenv("HOME") + "/.cache/prowdig/" + file.Name)
 				if err != nil {
 					return fmt.Errorf("failed to read from cache: %s: %w", file.Name, err)
 				}
