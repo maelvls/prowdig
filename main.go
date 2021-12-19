@@ -19,13 +19,6 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-func green(s string) string {
-	return fmt.Sprintf("\x1b[32m%s\x1b[0m", s)
-}
-func red(s string) string {
-	return fmt.Sprintf("\x1b[31m%s\x1b[0m", s)
-}
-
 type status string
 
 const (
@@ -33,16 +26,18 @@ const (
 	statusFailed status = "failed"
 )
 
+// Watch out, one test case outcome may appear twice in the array of testcases.
+// We do not do de-duplication yet.
 type testcase struct {
 	duration time.Duration
-	status   status // "passed", "failed"
+	status   status
 	name     string
 	err      string
 }
 
-var rmAnsiColorsRe = regexp.MustCompile(`\x1B\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]`)
-
-var reBuildLogFailures = regexp.MustCompile(`(?mi).*• FAILURE \[(?P<duration>\d+)\.\d+ .*
+var (
+	rmAnsiColorsRe     = regexp.MustCompile(`\x1B\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]`)
+	reBuildLogFailures = regexp.MustCompile(`(?mi).*• FAILURE \[(?P<duration>\d+)\.\d+ .*
 (?P<desc1>.*)\n.*\.go:\d+
 (?:  (?P<desc2>.*)\n  .*\.go:\d+)?
 (?:    (?P<desc3>.*)\n    .*\.go:\d+)?
@@ -56,6 +51,16 @@ var reBuildLogFailures = regexp.MustCompile(`(?mi).*• FAILURE \[(?P<duration>\
  +.*\.go:\d+
 ------------------------------
 `)
+)
+
+func main() {
+	flag.Parse()
+	err := run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
 
 func run() error {
 	gcs, err := storage.NewClient(context.Background())
@@ -120,16 +125,30 @@ func run() error {
 		prPrefixes = prPrefixes[len(prPrefixes)-20:]
 	}
 
-	reIsJunit := regexp.MustCompile(`junit__.*\.xml$`)
-	reIsBuildLogs := regexp.MustCompile(`build-log\.txt$`)
+	isJunit := regexp.MustCompile(`junit__.*\.xml$`)
+	isBuildLogs := regexp.MustCompile(`build-log\.txt$`)
 
+	// Beware the duplicates!! One test case for a given job may appear in both
+	// a junit file and in the build-log.txt. We do not de-duplicate them at the
+	// moment.
 	var testcases []testcase
 	for _, prPrefix := range prPrefixes {
 		fileIter := bucket.Objects(context.Background(), &storage.Query{
 			Prefix: prPrefix, Projection: storage.ProjectionNoACL,
 		})
 
-		fmt.Printf("fetching test artifacts under %s\n", prPrefix)
+		// For each PR prefix such as pr-logs/pull/jetstack_cert-manager/4664/,
+		// we fetch all the junit files and build-log.txt files. For example, these are going to be the ""
+		// want the following to be included:
+		//
+		//   pr-logs/pull/jetstack_cert-manager/1016/pull-cert-manager-e2e-v1-13/231/build-log.txt
+		//   pr-logs/pull/jetstack_cert-manager/1016/pull-cert-manager-e2e-v1-13/231/artifacts/junit__01.xml
+		//   pr-logs/pull/jetstack_cert-manager/1016/pull-cert-manager-e2e-v1-13/231/artifacts/junit__02.xml
+		//   pr-logs/pull/jetstack_cert-manager/1016/pull-cert-manager-e2e-v1-13/231/artifacts/junit__03.xml
+		//   pr-logs/pull/jetstack_cert-manager/1016/pull-cert-manager-e2e-v1-13/231/artifacts/junit__10.xml
+		//   <----------- prPrefix ------------>
+		//   <----------- file ---------------------------------------------------------------------------->
+		fmt.Fprintf(os.Stderr, "fetching test artifacts under %s\n", prPrefix)
 		for {
 			file, err := fileIter.Next()
 			if err == iterator.Done {
@@ -139,46 +158,17 @@ func run() error {
 				return fmt.Errorf("failed to iterate over GCS objects: %s: %w", file.Name, err)
 			}
 
-			if !reIsJunit.MatchString(file.Name) && !reIsBuildLogs.MatchString(file.Name) {
+			if !isJunit.MatchString(file.Name) && !isBuildLogs.MatchString(file.Name) {
 				continue
 			}
 
-			// Load from cache if it exists.
-			var bytes []byte
-			cachedFile := os.Getenv("HOME") + "/.cache/prowdig/" + file.Name
-			if _, err := os.Stat(cachedFile); err == nil {
-				bytes, err = ioutil.ReadFile(os.Getenv("HOME") + "/.cache/prowdig/" + file.Name)
-				if err != nil {
-					return fmt.Errorf("failed to read from cache: %s: %w", file.Name, err)
-				}
-
-				if crc32.Checksum(bytes, crc32.MakeTable(crc32.Castagnoli)) != file.CRC32C {
-					return fmt.Errorf("cached file has invalid checksum, please remove %s", cachedFile)
-				}
-			} else {
-				reader, err := bucket.Object(file.Name).NewReader(context.Background())
-				if err != nil {
-					return fmt.Errorf("failed to read GCS object: %s: %w", file.Name, err)
-				}
-
-				bytes, err = ioutil.ReadAll(reader)
-				if err != nil {
-					return fmt.Errorf("failed to read GCS object: %s: %w", file.Name, err)
-				}
-
-				err = os.MkdirAll(path.Dir(cachedFile), 0755)
-				if err != nil {
-					return fmt.Errorf("failed to create cache dir: %w", err)
-				}
-
-				err = ioutil.WriteFile(cachedFile, bytes, 0644)
-				if err != nil {
-					return fmt.Errorf("failed to write to cache: %s: %w", file.Name, err)
-				}
+			bytes, err := fetchObjectCached(file, bucket)
+			if err != nil {
+				return fmt.Errorf("failed to fetch %s: %w", file.Name, err)
 			}
 
 			switch {
-			case reIsJunit.MatchString(file.Name):
+			case isJunit.MatchString(file.Name):
 				s, err := junit.Ingest(bytes)
 				if err != nil {
 					return fmt.Errorf("failed to ingest junit xml for file %s: %w", file.Name, err)
@@ -205,7 +195,7 @@ func run() error {
 					}
 				}
 
-			case reIsBuildLogs.MatchString(file.Name):
+			case isBuildLogs.MatchString(file.Name):
 				parsed, err := parseBuildLogs(bytes)
 				if err != nil {
 					return fmt.Errorf("failed to parse build logs for file %s: %w", file.Name, err)
@@ -273,7 +263,68 @@ func run() error {
 	return nil
 }
 
-// Also removes the "[It]" suffixes from the test names.
+// fetchObjectCached fetches the object from GCS and stores it in
+// ~/.cache/prowdig/. If the object is already in the cache and its CRC32 sum
+// matches the one in GCS, the cached object is returned. If the CRC32 sum does
+// not match, the object is re-downloaded.
+func fetchObjectCached(file *storage.ObjectAttrs, bucket *storage.BucketHandle) ([]byte, error) {
+	var bytes []byte
+	cachedFile := os.Getenv("HOME") + "/.cache/prowdig/" + file.Name
+	if _, err := os.Stat(cachedFile); err == nil {
+		bytes, err = ioutil.ReadFile(os.Getenv("HOME") + "/.cache/prowdig/" + file.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read from cache: %s: %w", file.Name, err)
+		}
+
+		if crc32.Checksum(bytes, crc32.MakeTable(crc32.Castagnoli)) == file.CRC32C {
+			// We have hit the cache!
+			return bytes, nil
+		}
+	}
+
+	reader, err := bucket.Object(file.Name).NewReader(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to read GCS object: %s: %w", file.Name, err)
+	}
+
+	bytes, err = ioutil.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read GCS object: %s: %w", file.Name, err)
+	}
+
+	err = os.MkdirAll(path.Dir(cachedFile), 0755)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cache dir: %w", err)
+	}
+
+	err = ioutil.WriteFile(cachedFile, bytes, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write to cache: %s: %w", file.Name, err)
+	}
+
+	return bytes, nil
+}
+
+// Also removes the "[It]" suffixes from the test names. This function expects
+// the content of the build-log.txt file, and expects Ginkgo-style errors of the
+// form:
+//
+//   • Failure [301.437 seconds]                            <- duration ("301")
+//   [Conformance] Certificates                             <- desc1
+//   test/e2e/framework/framework.go:287
+//     with issuer type External ClusterIssuer              <- desc2 (optional)
+//     test/e2e/suite/conformance/certificates.go:47
+//       should issue a cert with wildcard DNS Name [It]    <- desc3 (optional)
+//       test/e2e/suite/conformance/certificates.go:105
+//       Unexpected error:
+//
+//           <*errors.errorString | 0xc0001c07b0>: {
+//               s: "timed out waiting for the condition",
+//           }
+//           timed out waiting for the condition           <- err
+//       occurred
+//       test/e2e/suite/conformance/certificates.go:522
+//   ------------------------------
 func parseBuildLogs(bytes []byte) ([]testcase, error) {
 	str := string(bytes)
 	str = rmAnsiColorsRe.ReplaceAllString(str, "")
@@ -304,15 +355,6 @@ func parseBuildLogs(bytes []byte) ([]testcase, error) {
 	return testcases, nil
 }
 
-func main() {
-	flag.Parse()
-	err := run()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-}
-
 // I want a list of matches, and each match is a map of the named submatches.
 func FindAllStringSubmatchMap(r *regexp.Regexp, str string) []map[string]string {
 	var submatchMaps []map[string]string
@@ -328,4 +370,11 @@ func FindAllStringSubmatchMap(r *regexp.Regexp, str string) []map[string]string 
 	}
 
 	return submatchMaps
+}
+
+func green(s string) string {
+	return fmt.Sprintf("\x1b[32m%s\x1b[0m", s)
+}
+func red(s string) string {
+	return fmt.Sprintf("\x1b[31m%s\x1b[0m", s)
 }

@@ -4,6 +4,9 @@ Dig into Prow logs of cert-manager to find which test cases have a timeout too
 high compared to the "passed" runs of that test. You must have read access to the
 bucket `gs://jetstack-logs` in order to run prowdig.
 
+I wrote this tool because some Prow jobs in cert-manager would fail after almost
+2 hours due to overly large timeouts in tests.
+
 ![Screenshot from 2021-12-18 22-49-26](https://user-images.githubusercontent.com/2195781/146656953-6c4f18f3-d273-472d-bac1-e7e4232cea29.png)
 
 Install:
@@ -70,4 +73,29 @@ free to delete it when you are done:
 
 ```sh
 rm -rf ~/.cache/prowdig
+```
+
+prowdig works by fetching the `junit__xx.xml` files from the jobs of the last 20
+PRs. But there is a caveat to it: the junit files are only uploaded when the
+Prow job finishes before the job's timeout (which about 2 hours). Which means
+that in order to find out which tests have timed out, we have to look at the raw
+build-log.txt and parse errors of the form:
+
+```plain
+//   • Failure [301.437 seconds]
+//   [Conformance] Certificates
+//   test/e2e/framework/framework.go:287
+//     with issuer type External ClusterIssuer
+//     test/e2e/suite/conformance/certificates.go:47
+//       should issue a cert with wildcard DNS Name [It]
+//       test/e2e/suite/conformance/certificates.go:105
+//       Unexpected error:
+//
+//           <*errors.errorString | 0xc0001c07b0>: {
+//               s: "timed out waiting for the condition",
+//           }
+//           timed out waiting for the condition
+//       occurred
+//       test/e2e/suite/conformance/certificates.go:522
+//   ------------------------------
 ```
