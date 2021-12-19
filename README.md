@@ -82,20 +82,20 @@ that in order to find out which tests have timed out, we have to look at the raw
 build-log.txt and parse errors of the form:
 
 ```plain
-//   • Failure [301.437 seconds]
-//   [Conformance] Certificates
-//   test/e2e/framework/framework.go:287
-//     with issuer type External ClusterIssuer
-//     test/e2e/suite/conformance/certificates.go:47
-//       should issue a cert with wildcard DNS Name [It]
-//       test/e2e/suite/conformance/certificates.go:105
-//       Unexpected error:
-//
-//           <*errors.errorString | 0xc0001c07b0>: {
-//               s: "timed out waiting for the condition",
-//           }
-//           timed out waiting for the condition
-//       occurred
-//       test/e2e/suite/conformance/certificates.go:522
-//   ------------------------------
+• Failure [301.437 seconds]
+[Conformance] Certificates
+test/e2e/framework/framework.go:287
+  with issuer type External ClusterIssuer
+  test/e2e/suite/conformance/certificates.go:47
+    should issue a cert with wildcard DNS Name [It]
+    test/e2e/suite/conformance/certificates.go:105
+    Unexpected error:
+
+        <*errors.errorString | 0xc0001c07b0>: {
+            s: "timed out waiting for the condition",
+        }
+        timed out waiting for the condition
+    occurred
+    test/e2e/suite/conformance/certificates.go:522
+------------------------------
 ```
