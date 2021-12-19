@@ -2,7 +2,11 @@
 
 Dig into Prow logs of cert-manager to find which test cases have a timeout too
 high compared to the "passed" runs of that test. You must have read access to the
-bucket `gs://jetstack-logs` in order to run prowdig.
+bucket `gs://jetstack-logs` in order to run prowdig. To log in to the bucket, run:
+
+```sh
+gcloud auth application-default login
+```
 
 I wrote this tool because some Prow jobs in cert-manager would fail after almost
 2 hours due to overly large timeouts in tests.
