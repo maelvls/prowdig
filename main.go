@@ -135,7 +135,7 @@ func main() {
 		}
 
 	case "max-duration":
-		err := runMaxDurationStats(CLI.MaxDuration.Output)
+		err := runMaxDurationStats(CLI.MaxDuration.Output, CLI.MaxDuration.Limit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -145,14 +145,14 @@ func main() {
 	}
 }
 
-func runMaxDurationStats(output string) error {
+func runMaxDurationStats(output string, limitPRs int) error {
 	gcs, err := storage.NewClient(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to create GCS client: %v", err)
 	}
 	bucket := gcs.Bucket("jetstack-logs")
 
-	testcases, err := fetchGinkgoResults(bucket, 20)
+	testcases, err := fetchGinkgoResults(bucket, limitPRs)
 	if err != nil {
 		return fmt.Errorf("failed to fetch testcases: %v", err)
 	}
@@ -398,6 +398,7 @@ func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]gink
 			BarEnd:        "]",
 		}),
 	)
+	_ = bar.RenderBlank()
 	go func() {
 		for !bar.IsFinished() {
 			time.Sleep(200 * time.Millisecond)
@@ -442,6 +443,7 @@ func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]gink
 			BarEnd:        "]",
 		}),
 	)
+	_ = bar.RenderBlank()
 	var ginkgoResults []ginkgoResult
 	for _, object := range objects {
 		bytes, err := fetchObject(&object, bucket)
@@ -583,6 +585,7 @@ func listObjectsUnderPrefixes(bucket *storage.BucketHandle, prPrefixes []string,
 			BarEnd:        "]",
 		}),
 	)
+	_ = bar.RenderBlank()
 	defer func() {
 		_ = bar.Clear()
 		_ = bar.Finish()
