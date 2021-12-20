@@ -22,7 +22,7 @@ go install github.com/maelvls/prowdig@latest
 Run:
 
 ```sh
-$ prowdig
+$ prowdig max-duration --limit=20
 ...
 22s     5m8s    [cert-manager] Vault ClusterIssuer CertificateRequest (AppRole) should generate a new certificate valid for the default value (90 days)
 14s     5m0s    [Conformance] Certificates with issuer type CA ClusterIssuer Creating a Gateway with annotations for issuerRef and other Certificate fields
@@ -102,4 +102,29 @@ test/e2e/framework/framework.go:287
     occurred
     test/e2e/suite/conformance/certificates.go:522
 ------------------------------
+```
+
+If you would like to list the Ginkgo failures that happened
+in a given file (can be a URL), you can run:
+
+```
+prowdig parse-logs https://storage.googleapis.com/jetstack-logs/pr-logs/pull/jetstack_cert-manager/4044/pull-cert-manager-e2e-v1-21/1395667201859522561/build-log.txt
+```
+
+That will show you an overview of the failures:
+
+```
+31s     [cert-manager] CertificateRequest with a properly configured Issuer should obtain a signed certificate for a single domain: timed out waiting for the condition
+1m9s    [cert-manager] Vault Issuer should be ready with a valid Kubernetes Role and ServiceAccount Secret: timed out waiting for the condition: Last Status: 'False' Reason: 'VaultError', Message: 'Failed to initialize Vault client: error reading Kubernetes service account token from vault-serviceaccount: error calling Vault server: Error making API request.
+
+URL: POST https://vault.e2e-tests-create-vault-issuer-pgvs6:8200/v1/auth/kubernetes/login
+Code: 403. Errors:
+
+* permission denied'
+1m11s   [cert-manager] Vault Issuer should be ready with a valid Kubernetes Role and ServiceAccount Secret: timed out waiting for the condition: Last Status: 'False' Reason: 'VaultError', Message: 'Failed to initialize Vault client: error reading Kubernetes service account token from vault-serviceaccount: error calling Vault server: Error making API request.
+
+URL: POST https://vault.e2e-tests-create-vault-issuer-klmxs:8200/v1/auth/kubernetes/login
+Code: 403. Errors:
+
+* permission denied'
 ```
