@@ -100,7 +100,9 @@ func main() {
 			os.Exit(1)
 		}
 
-		var results []ginkgoResult
+		// We don't use the syntax 'var results' so that the encoded JSON shows
+		// "[]" instead of "null".
+		results := []ginkgoResult{}
 		for _, block := range blocks {
 			res, err := parseGinkgoBlock(block)
 			if err != nil {
@@ -135,7 +137,39 @@ func main() {
 		}
 
 	case "max-duration":
-		err := runMaxDurationStats(CLI.MaxDuration.Output, CLI.MaxDuration.Limit)
+		gcs, err := storage.NewClient(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: Google Cloud storage: %v\n", err)
+			os.Exit(1)
+		}
+		bucket := gcs.Bucket("jetstack-logs")
+
+		testcases, err := fetchGinkgoResults(bucket, CLI.MaxDuration.Limit)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to fetch testcases: %v\n", err)
+			os.Exit(1)
+		}
+
+		stats := computeStatsMaxDuration(testcases)
+		switch CLI.MaxDuration.Output {
+		case "json":
+			if stats == nil {
+				// Force the encoded JSON to show "[]" instead of "null".
+				stats = []StatsMaxDuration{}
+			}
+			err = json.NewEncoder(os.Stdout).Encode(stats)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			}
+		case "text":
+			for _, stat := range stats {
+				fmt.Printf("%s\t%s\t%s\n",
+					green(stat.MaxDurationSuccess.Truncate(1*time.Second).String()),
+					red(stat.MaxDurationFailed.Truncate(1*time.Second).String()),
+					stat.Name,
+				)
+			}
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -143,38 +177,6 @@ func main() {
 	default:
 		panic(kongctx.Command())
 	}
-}
-
-func runMaxDurationStats(output string, limitPRs int) error {
-	gcs, err := storage.NewClient(context.Background())
-	if err != nil {
-		return fmt.Errorf("failed to create GCS client: %v", err)
-	}
-	bucket := gcs.Bucket("jetstack-logs")
-
-	testcases, err := fetchGinkgoResults(bucket, limitPRs)
-	if err != nil {
-		return fmt.Errorf("failed to fetch testcases: %v", err)
-	}
-
-	stats := computeStatsMaxDuration(testcases)
-	switch output {
-	case "json":
-		err = json.NewEncoder(os.Stdout).Encode(stats)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		}
-	case "text":
-		for _, stat := range stats {
-			fmt.Printf("%s\t%s\t%s\n",
-				green(stat.MaxDurationSuccess.Truncate(1*time.Second).String()),
-				red(stat.MaxDurationFailed.Truncate(1*time.Second).String()),
-				stat.Name,
-			)
-		}
-	}
-
-	return nil
 }
 
 // One ginkgo block looks like this:
@@ -385,7 +387,7 @@ var isParen = regexp.MustCompile(" *}$")
 // (just the attributes), and then a bar to download the XML and build-log.txt
 // files.
 func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]ginkgoResult, error) {
-	bar := progressbar.NewOptions(int(10 /* seconds */ *5 /* =1/200ms */),
+	bar := progressbar.NewOptions(int(5 /* seconds */ *5 /* =1/200ms */),
 		progressbar.OptionSetPredictTime(false),
 		progressbar.OptionEnableColorCodes(true),
 		progressbar.OptionShowBytes(false),

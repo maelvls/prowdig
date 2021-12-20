@@ -128,3 +128,21 @@ Code: 403. Errors:
 
 * permission denied'
 ```
+
+You can pass `-ojson` to get the output in JSON format. The durations are shown
+in nanoseconds:
+
+```sh
+$ prowdig max-duration --limit=1 -ojson | jq
+[
+  {
+    "Name": "[Conformance] Certificates with issuer type VaultAppRole ClusterIssuer should issue a certificate that defines a wildcard DNS Name and its apex DNS Name",
+    "MaxDurationSuccess": 32430242000,
+    "MaxDurationFailed": 611000000000
+  },
+  ...
+]
+```
+
+For example, with 611000000000 nanoseconds, 611000000000/1000000000 = 611
+seconds. (yes, I should rather show the durations in seconds, but I'm lazy).
