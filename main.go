@@ -184,7 +184,7 @@ func main() {
 			for _, stat := range stats {
 				fmt.Printf("%s\t%s\t%s\n",
 					green((time.Duration(stat.MaxDurationPassed) * time.Second).String()),
-					red((time.Duration(stat.MaxDurationPassed) * time.Second).String()),
+					red((time.Duration(stat.MaxDurationFailed) * time.Second).String()),
 					stat.Name,
 				)
 			}
