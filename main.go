@@ -22,7 +22,9 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/alecthomas/kong"
+	"github.com/fatih/color"
 	"github.com/joshdk/go-junit"
+	"github.com/mattn/go-isatty"
 	pb "github.com/schollz/progressbar/v3"
 	"google.golang.org/api/iterator"
 )
@@ -40,6 +42,10 @@ var (
 	isBuildLogFile      = regexp.MustCompile(`build-log\.txt$`)
 	isJunitOrBuildLog   = regexp.MustCompile("(" + isJunitFile.String() + "|" + isBuildLogFile.String() + ")")
 	reObjectName        = regexp.MustCompile(`/(\d+)\/([^\/]+)\/(\d+)\/`)
+
+	red   = color.New(color.FgRed).SprintFunc()
+	green = color.New(color.FgGreen).SprintFunc()
+	blue  = color.New(color.FgBlue).SprintFunc()
 )
 
 type status string
@@ -116,11 +122,22 @@ var CLI struct {
 			Limit int `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
 		} `cmd:"" help:"Lists all the jobs."`
 	} `cmd:"" help:"Everything related to jobs."`
-	NoDownload bool `help:"If a command is meant to fetch from GCS, only use the local cache, do not download anything."`
+	NoDownload bool   `help:"If a command is meant to fetch from GCS, only use the local cache, do not download anything."`
+	Color      string `help:"Change the coloring behavior. Can be one of auto, never, or always." enum:"auto,never,always" default:"auto"`
 }
 
 func main() {
 	kongctx := kong.Parse(&CLI)
+
+	switch CLI.Color {
+	case "auto":
+		color.NoColor = os.Getenv("TERM") == "dumb" || !isatty.IsTerminal(os.Stdout.Fd())
+	case "never":
+		color.NoColor = true
+	case "always":
+		color.NoColor = false
+	}
+
 	switch kongctx.Command() {
 	case "tests parse-logs <file-or-url>":
 		var bytes []byte
@@ -193,13 +210,14 @@ func main() {
 			}
 		case "text":
 			for _, res := range results {
+				duration := (time.Duration(res.Duration) * time.Second).String()
 				switch res.Status {
 				case statusPassed:
-					fmt.Printf("%s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.Name)
+					fmt.Printf("%s\t%s\n", green(duration), res.Name)
 				case statusFailed:
-					fmt.Printf("%s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+					fmt.Printf("%s\t%s: %s\n", red(duration), res.Name, res.Err)
 				case statusError:
-					fmt.Printf("%s\t%s: %s\n", blue((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+					fmt.Printf("%s\t%s: %s\n", blue(duration), res.Name, res.Err)
 				default:
 					panic("developer mistake: unknown status: " + res.Status)
 				}
@@ -1292,14 +1310,4 @@ func parseObjectName(objectName string) (pr int, job string, build int, err erro
 	}
 
 	return pr, job, build, nil
-}
-
-func green(s string) string {
-	return fmt.Sprintf("\x1b[32m%s\x1b[0m", s)
-}
-func red(s string) string {
-	return fmt.Sprintf("\x1b[31m%s\x1b[0m", s)
-}
-func blue(s string) string {
-	return fmt.Sprintf("\x1b[34m%s\x1b[0m", s)
 }
