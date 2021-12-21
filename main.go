@@ -179,8 +179,8 @@ func main() {
 		case "text":
 			for _, stat := range stats {
 				fmt.Printf("%s\t%s\t%s\n",
-					green((time.Duration(stat.MaxDurationSuccess) * time.Second).String()),
-					red((time.Duration(stat.MaxDurationSuccess) * time.Second).String()),
+					green((time.Duration(stat.MaxDurationPassed) * time.Second).String()),
+					red((time.Duration(stat.MaxDurationPassed) * time.Second).String()),
 					stat.Name,
 				)
 			}
@@ -574,9 +574,9 @@ func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]gink
 }
 
 type StatsMaxDuration struct {
-	Name               string
-	MaxDurationSuccess int
-	MaxDurationFailed  int
+	Name              string `json:"name"`
+	MaxDurationPassed int    `json:"maxDurationPassed"` // in seconds
+	MaxDurationFailed int    `json:"maxDurationFailed"`
 }
 
 func computeStatsMaxDuration(results []ginkgoResult) []StatsMaxDuration {
@@ -627,9 +627,9 @@ func computeStatsMaxDuration(results []ginkgoResult) []StatsMaxDuration {
 	var stats []StatsMaxDuration
 	for _, name := range testNames {
 		stats = append(stats, StatsMaxDuration{
-			Name:               name,
-			MaxDurationSuccess: maxMap[name].success,
-			MaxDurationFailed:  maxMap[name].failed,
+			Name:              name,
+			MaxDurationPassed: maxMap[name].success,
+			MaxDurationFailed: maxMap[name].failed,
 		})
 	}
 	return stats

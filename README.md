@@ -64,11 +64,46 @@ is:
 Max. duration of "failed".
 ```
 
-prowdig displays test cases by ascending order of priority ("priority" meaning
-that you should take a look at this test case). The last test case displayed is
-the one with the highest difference between the max. duration of "passed" and
-max. duration of "failed". The test cases for which no "failed" result are not
-displayed.
+prowdig max-duration displays test cases by ascending order of priority
+("priority" meaning that you should take a look at this test case). The last
+test case displayed is the one with the highest difference between the max.
+duration of "passed" and max. duration of "failed". The test cases for which no
+"failed" result are not displayed.
+
+You can list all the Ginkgo results:
+
+```sh
+$ prowdig list
+17s     [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate valid for 35 days
+19s     [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate valid for 35 days
+7s      [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate valid for the default value (90 days)
+5s      [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate valid for the default value (90 days)
+14s     [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate with Vault configured maximum TTL duration (90 days) when requested duration is greater than TTL
+13s     [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate with Vault configured maximum TTL duration (90 days) when requested duration is greater than TTL
+10s     [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate with a warning event when renewBefore is bigger than the duration
+11s     [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate with a warning event when renewBefore is bigger than the duration
+7s      [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new valid certificate
+9s      [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new valid certificate
+6s      [cert-manager] Vault Issuer should be ready with a valid AppRole
+5s      [cert-manager] Vault Issuer should be ready with a valid AppRole
+7s      [cert-manager] Vault Issuer should be ready with a valid Kubernetes Role and ServiceAccount Secret
+17s     [cert-manager] Vault Issuer should be ready with a valid Kubernetes Role and ServiceAccount Secret
+7s      [cert-manager] Vault Issuer should fail to init with missing Kubernetes Role
+10s     [cert-manager] Vault Issuer should fail to init with missing Kubernetes Role
+6s      [cert-manager] Vault Issuer should fail to init with missing Vault AppRole
+4s      [cert-manager] Vault Issuer should fail to init with missing Vault AppRole
+18s     [cert-manager] Vault Issuer should fail to init with missing Vault Token
+19s     [cert-manager] Vault Issuer should fail to init with missing Vault Token
+```
+
+Note that each test name may appear multiple times in the list, since multiple
+jobs are analyzed.
+
+The color of the duration:
+
+- Red = failed,
+- Green = passed,
+- Blue = error (test setup failure reported an error during setting up the test).
 
 Since the build-log.txt files large (can go up to 36MB in case of many timeouts,
 which is around 600MB for 20 PRs which account for 476 `build-log.txt` files),
@@ -107,13 +142,13 @@ test/e2e/framework/framework.go:287
 If you would like to list the Ginkgo failures that happened
 in a given file (can be a URL), you can run:
 
-```
+```sh
 prowdig parse-logs https://storage.googleapis.com/jetstack-logs/pr-logs/pull/jetstack_cert-manager/4044/pull-cert-manager-e2e-v1-21/1395667201859522561/build-log.txt
 ```
 
 That will show you an overview of the failures:
 
-```
+```plain
 31s     [cert-manager] CertificateRequest with a properly configured Issuer should obtain a signed certificate for a single domain: timed out waiting for the condition
 1m9s    [cert-manager] Vault Issuer should be ready with a valid Kubernetes Role and ServiceAccount Secret: timed out waiting for the condition: Last Status: 'False' Reason: 'VaultError', Message: 'Failed to initialize Vault client: error reading Kubernetes service account token from vault-serviceaccount: error calling Vault server: Error making API request.
 
@@ -129,20 +164,92 @@ Code: 403. Errors:
 * permission denied'
 ```
 
-You can pass `-ojson` to get the output in JSON format. The durations are shown
-in nanoseconds:
+You can pass `-ojson` to get the output in JSON format:
 
 ```sh
 $ prowdig max-duration --limit=1 -ojson | jq
 [
   {
-    "Name": "[Conformance] Certificates with issuer type VaultAppRole ClusterIssuer should issue a certificate that defines a wildcard DNS Name and its apex DNS Name",
-    "MaxDurationSuccess": 32430242000,
-    "MaxDurationFailed": 611000000000
+    "name": "[Conformance] Certificates with issuer type VaultAppRole ClusterIssuer should issue a certificate that defines a wildcard DNS Name and its apex DNS Name",
+    "maxDurationPassed": 32,
+    "maxDurationFailed": 611
   },
   ...
 ]
 ```
 
-For example, with 611000000000 nanoseconds, 611000000000/1000000000 = 611
-seconds. (yes, I should rather show the durations in seconds, but I'm lazy).
+- `maxDurationPassed` and `MaxDurationFailed` are in seconds and correspond to
+  the maximum duration of the "passed" and "failed" runs for a given test name.
+
+```sh
+$ prowdig list --limit=1 -ojson | jq
+[
+  {
+    "name": "[cert-manager] Vault Issuer should fail to init with missing Vault Token",
+    "status": "passed",
+    "duration": 18,
+    "err": "",
+    "errLoc": "",
+    "source": ""
+  },
+  {
+    "name": "[Conformance] CertificateSigningRequests CertificateSigningRequest with issuer type SelfSigned Issuer should issue an ECDSA certificate for a single distinct DNS Name",
+    "status": "failed",
+    "duration": 1,
+    "err": "CertificateSigningRequest has failed: {[{Approved True e2e.cert-manager.io Request approved for e2e testing. 2021-11-26 08:30:47 +0000 UTC 2021-11-26 08:30:47 +0000 UTC} {Failed True SecretNotFound Referenced Secret e2e-tests-certificatesigningrequests-q7sg9/selfsigned-requester-key-kgl8l not found 2021-11-26 08:30:47 +0000 UTC 2021-11-26 08:30:47 +0000 UTC}] []}",
+    "errLoc": "test/e2e/suite/conformance/certificatesigningrequests/tests.go:393",
+    "source": "https://storage.googleapis.com/jetstack-logs/pr-logs/pull/jetstack_cert-manager/4598/pull-cert-manager-e2e-v1-22/1464143130398822400/build-log.txt#line=23497"
+  },
+  ...
+]
+```
+
+- `status` is either "passed", "failed", or "error". "error" appears when Ginkgo
+  reported an error during setting up the test:
+
+  ```plain
+  • Failure in Spec Setup (BeforeEach) [61.637 seconds]
+  [cert-manager] ACME CertificateRequest (HTTP01)
+  test/e2e/framework/framework.go:283
+    should automatically recreate challenge pod and still obtain a certificate if it is manually deleted [BeforeEach]
+    test/e2e/suite/issuers/acme/certificaterequest/http01.go:207
+
+    Unexpected error:
+        <*errors.errorString | 0xc000234850>: {
+            s: "timed out waiting for the condition",
+        }
+        timed out waiting for the condition
+    occurred
+
+    test/e2e/suite/issuers/acme/certificaterequest/http01.go:93
+  ------------------------------
+  ```
+
+- `duration` is in second.
+- `errLoc` is the file path and line number of where the error was declared:
+
+  ```plain
+  • Failure [301.437 seconds]
+  [Conformance] Certificates
+  test/e2e/framework/framework.go:287
+    with issuer type External ClusterIssuer
+    test/e2e/suite/conformance/certificates.go:47
+      should issue a cert with wildcard DNS Name [It]
+      test/e2e/suite/conformance/certificates.go:105
+
+      Unexpected error:
+
+          <*errors.errorString | 0xc0001c07b0>: {
+              s: "timed out waiting for the condition",
+          }
+          timed out waiting for the condition
+      occurred
+
+      test/e2e/suite/conformance/certificates.go:522      <------ errLoc
+  ------------------------------
+  ```
+
+- `source` is the file path and line number of the `build-log.txt`-like file. If
+  it is a URL, the line number is appended as `#line=<line_number>`.
+- `err` is the un-indented error message. The line containing `errLoc` is not
+  included in `err`.
