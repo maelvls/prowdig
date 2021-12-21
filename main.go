@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -22,6 +25,21 @@ import (
 	"github.com/joshdk/go-junit"
 	pb "github.com/schollz/progressbar/v3"
 	"google.golang.org/api/iterator"
+)
+
+var (
+	bucketName   = "jetstack-logs"
+	bucketPrefix = "pr-logs/pull/jetstack_cert-manager"
+	cacheDir     = os.Getenv("HOME") + "/.cache/prowdig/" + bucketName
+
+	endsWithPRNumber    = regexp.MustCompile(`/(\d+)/?$`)
+	rmAnsiColors        = regexp.MustCompile(`\x1B\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]`)
+	reGingkoBlockHeader = regexp.MustCompile(`• (Failure|Failure in Spec Setup.*) \[(\d+)\.\d+ `)
+	isParen             = regexp.MustCompile(" *}$")
+	isJunitFile         = regexp.MustCompile(`junit__.*\.xml$`)
+	isBuildLogFile      = regexp.MustCompile(`build-log\.txt$`)
+	isJunitOrBuildLog   = regexp.MustCompile("(" + isJunitFile.String() + "|" + isBuildLogFile.String() + ")")
+	reObjectName        = regexp.MustCompile(`/(\d+)\/([^\/]+)\/(\d+)\/`)
 )
 
 type status string
@@ -63,33 +81,52 @@ type ginkgoResult struct {
 	//
 	// https://storage.googleapis.com/jetstack-logs/pr-logs/pull/.../build-log.txt
 	Source string `json:"source"`
+
+	// (optional) The name of the Prow job.
+	Job string `json:"job"`
+
+	// (optional) The PR number.
+	PR int `json:"pr"`
+
+	// (optional) The Prow job build number.
+	Build int `json:"build"`
 }
 
 var CLI struct {
-	ParseLogs struct {
-		Output    string `output:" Output format." short:"o" default:"text" enum:"text,json"`
-		FileOrURL string `arg:"" help:"Log file or URL to be parsed for Ginkgo blocks."`
-	} `cmd:"" help:"Parse the Ginkgo failure blocks from a given file or URL."`
+	Tests struct {
+		Output    string `output:"Output format." short:"o" default:"text" enum:"text,json"`
+		ParseLogs struct {
+			FileOrURL string `arg:"" help:"Log file or URL to be parsed for Ginkgo blocks."`
+		} `cmd:"" help:"Parse the Ginkgo failure blocks from a given file or URL."`
 
-	List struct {
-		Output string `output:" Output format." short:"o" default:"text" enum:"text,json"`
-		Limit  int    `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
-	} `cmd:"" help:"Lists all the test results ordered by name. The logs are fetched from the bucket."`
+		List struct {
+			Limit int `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+		} `cmd:"" help:"Lists all the test results ordered by name. The logs are fetched from the bucket."`
 
-	MaxDuration struct {
-		Output string `output:" Output format." short:"o" default:"text" enum:"text,json"`
-		Limit  int    `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
-	} `cmd:"" help:"Lists the maximum 'passed' duration vs. maximum 'failed' duration of each test order by name. The logs are fetched from the bucket."`
+		MaxDuration struct {
+			Limit      int  `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+			NoDownload bool `help:"Only use the local cache, do not download anything from the GCS bucket."`
+		} `cmd:"" help:"Lists the maximum 'passed' duration vs. maximum 'failed' duration of each test order by name. The logs are fetched from the bucket."`
+	} `cmd:"" help:"Everything related to individual test cases."`
+
+	Jobs struct {
+		// Output string   `output:"Output format." short:"o" default:"text" enum:"text,json"`
+		List struct {
+			Limit int `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+		} `cmd:"" help:"Lists all the jobs."`
+	} `cmd:"" help:"Everything related to jobs."`
+	NoDownload bool `help:"If a command is meant to fetch from GCS, only use the local cache, do not download anything."`
 }
 
 func main() {
 	kongctx := kong.Parse(&CLI)
 	switch kongctx.Command() {
-	case "parse-logs <file-or-url>":
+	case "tests parse-logs <file-or-url>":
 		var bytes []byte
 		var err error
-		if strings.HasPrefix(CLI.ParseLogs.FileOrURL, "http://") || strings.HasPrefix(CLI.ParseLogs.FileOrURL, "https://") {
-			content, err := http.Get(CLI.ParseLogs.FileOrURL)
+		isURL := strings.HasPrefix(CLI.Tests.ParseLogs.FileOrURL, "http://") || strings.HasPrefix(CLI.Tests.ParseLogs.FileOrURL, "https://")
+		if isURL {
+			content, err := http.Get(CLI.Tests.ParseLogs.FileOrURL)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "fetching URL: %v\n", err)
 			}
@@ -102,7 +139,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "fetching URL: %s: %v\n", content.Status, string(bytes))
 			}
 		} else {
-			bytes, err = ioutil.ReadFile(CLI.ParseLogs.FileOrURL)
+			bytes, err = ioutil.ReadFile(CLI.Tests.ParseLogs.FileOrURL)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				os.Exit(1)
@@ -111,7 +148,7 @@ func main() {
 
 		blocks, err := parseBuildLog(bytes)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: while parsing %s: %v\n", CLI.ParseLogs.FileOrURL, err)
+			fmt.Fprintf(os.Stderr, "error: while parsing %s: %v\n", CLI.Tests.ParseLogs.FileOrURL, err)
 			os.Exit(1)
 		}
 
@@ -119,18 +156,34 @@ func main() {
 		// "[]" instead of "null".
 		results := []ginkgoResult{}
 		for _, block := range blocks {
-			res, err := parseGinkgoBlock(block, CLI.ParseLogs.FileOrURL)
+			parsed, err := parseGinkgoBlock(block, CLI.Tests.ParseLogs.FileOrURL)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: parsing one of the ginkgo blocks: %v\n", err)
 			}
-			results = append(results, res)
+
+			source := CLI.Tests.ParseLogs.FileOrURL + ":" + strconv.Itoa(block.line)
+			if isURL {
+				source = CLI.Tests.ParseLogs.FileOrURL + "#line=" + strconv.Itoa(block.line)
+			}
+
+			results = append(results, ginkgoResult{
+				Name:     parsed.name,
+				Status:   parsed.status,
+				Duration: parsed.duration,
+				Err:      parsed.errStr,
+				ErrLoc:   parsed.errLoc,
+				Source:   source,
+				Job:      "",
+				PR:       0,
+				Build:    0,
+			})
 		}
 
 		sort.Slice(results, func(i, j int) bool {
 			return strings.Compare(results[i].Name, results[j].Name) < 0
 		})
 
-		switch CLI.ParseLogs.Output {
+		switch CLI.Tests.Output {
 		case "json":
 			err = json.NewEncoder(os.Stdout).Encode(results)
 			if err != nil {
@@ -151,26 +204,27 @@ func main() {
 				}
 			}
 		default:
-			fmt.Fprintf(os.Stderr, "developer mistake, defined in kong's enum but not handled: %q\n", CLI.ParseLogs.Output)
+			fmt.Fprintf(os.Stderr, "developer mistake, defined in kong's enum but not handled: %q\n", CLI.Tests.Output)
 			os.Exit(1)
 		}
 
-	case "max-duration":
-		gcs, err := storage.NewClient(context.Background())
+	case "tests max-duration":
+		if !CLI.NoDownload {
+			err := downloadJobArtifactsToCache(bucketName, CLI.Tests.List.Limit)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefix, CLI.Tests.MaxDuration.Limit)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: Google Cloud storage: %v\n", err)
-			os.Exit(1)
-		}
-		bucket := gcs.Bucket("jetstack-logs")
-
-		ginkgoResults, err := fetchGinkgoResults(bucket, CLI.MaxDuration.Limit)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to fetch Ginkgo test results: %v\n", err)
+			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
 			os.Exit(1)
 		}
 
-		stats := computeStatsMaxDuration(ginkgoResults)
-		switch CLI.MaxDuration.Output {
+		stats := computeStatsMaxDuration(results)
+		switch CLI.Tests.Output {
 		case "json":
 			if stats == nil {
 				// Force the encoded JSON to show "[]" instead of "null".
@@ -194,17 +248,18 @@ func main() {
 			os.Exit(1)
 		}
 
-	case "list":
-		gcs, err := storage.NewClient(context.Background())
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: Google Cloud storage: %v\n", err)
-			os.Exit(1)
+	case "tests list":
+		if !CLI.NoDownload {
+			err := downloadJobArtifactsToCache(bucketName, CLI.Tests.List.Limit)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
+				os.Exit(1)
+			}
 		}
-		bucket := gcs.Bucket("jetstack-logs")
 
-		results, err := fetchGinkgoResults(bucket, CLI.List.Limit)
+		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefix, CLI.Tests.List.Limit)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to fetch testcases: %v\n", err)
+			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -212,7 +267,7 @@ func main() {
 			return strings.Compare(results[i].Name, results[j].Name) < 0
 		})
 
-		switch CLI.List.Output {
+		switch CLI.Tests.Output {
 		case "json":
 			if results == nil {
 				// Force the encoded JSON to show "[]" instead of "null".
@@ -234,6 +289,46 @@ func main() {
 				default:
 					panic("developer mistake: unknown status: " + res.Status)
 				}
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "jobs list":
+		if !CLI.NoDownload {
+			err := downloadJobArtifactsToCache(bucketName, CLI.Tests.List.Limit)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefix, CLI.Tests.List.Limit)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
+			os.Exit(1)
+		}
+
+		stats := computeStatsMaxDuration(results)
+		switch CLI.Tests.Output {
+		case "json":
+			if stats == nil {
+				// Force the encoded JSON to show "[]" instead of "null".
+				stats = []StatsMaxDuration{}
+			}
+			err = json.NewEncoder(os.Stdout).Encode(stats)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			}
+		case "text":
+			for _, stat := range stats {
+				fmt.Printf("%s\t%s\t%s\n",
+					green((time.Duration(stat.MaxDurationPassed) * time.Second).String()),
+					red((time.Duration(stat.MaxDurationFailed) * time.Second).String()),
+					stat.Name,
+				)
 			}
 		}
 		if err != nil {
@@ -273,8 +368,6 @@ type ginkgoBlock struct {
 	// '• Failure [301.437 seconds]'. It does not include the ending marker
 	// '------------------------------'.
 	lines []string
-
-	source string
 }
 
 // The function parseBuildLog parses the content of a build-log.txt file and
@@ -282,7 +375,6 @@ type ginkgoBlock struct {
 // that are printed by Ginkgo before giving the logs to this function.
 func parseBuildLog(buildLog []byte) ([]ginkgoBlock, error) {
 	// Since Ginkgo colors its output, we need to remove the ANSI escape codes.
-	rmAnsiColors := regexp.MustCompile(`\x1B\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]`)
 	buildLog = rmAnsiColors.ReplaceAll(buildLog, []byte(""))
 
 	var blocks []ginkgoBlock
@@ -318,16 +410,23 @@ func parseBuildLog(buildLog []byte) ([]ginkgoBlock, error) {
 	return blocks, nil
 }
 
-var reGingkoBlockHeader = regexp.MustCompile(`• (Failure|Failure in Spec Setup.*) \[(\d+)\.\d+ `)
+type parsedGinkgoBlock struct {
+	// The name of the test.
+	name     string
+	status   status
+	duration int
+	errStr   string
+	errLoc   string
+}
 
 // The parseGinkgoBlock function parses the body of one ginkgo block, as defined
 // in the diagram above the ginkgoBlock struct.
 //
 // Note that the "[It]" suffixes are removed from the test names in order to
 // match the test name given in junit__0x.xml files.
-func parseGinkgoBlock(block ginkgoBlock, fileOrURL string) (ginkgoResult, error) {
+func parseGinkgoBlock(block ginkgoBlock, fileOrURL string) (parsedGinkgoBlock, error) {
 	if len(block.lines) < 2 {
-		return ginkgoResult{}, fmt.Errorf("a ginkgo block is at least 2 lines long, got: %s", strings.Join(block.lines, "\n"))
+		return parsedGinkgoBlock{}, fmt.Errorf("a ginkgo block is at least 2 lines long, got: %s", strings.Join(block.lines, "\n"))
 	}
 
 	// • Failure [301.574 seconds]                          <- Header
@@ -351,7 +450,7 @@ func parseGinkgoBlock(block ginkgoBlock, fileOrURL string) (ginkgoResult, error)
 	// Header.
 	match := reGingkoBlockHeader.FindStringSubmatch(block.lines[0])
 	if len(match) != 3 {
-		return ginkgoResult{}, fmt.Errorf("ginkgo block header: expected %s, got: %s", reGingkoBlockHeader, block.lines[0])
+		return parsedGinkgoBlock{}, fmt.Errorf("ginkgo block header: expected %s, got: %s", reGingkoBlockHeader, block.lines[0])
 	}
 
 	var status status
@@ -361,25 +460,17 @@ func parseGinkgoBlock(block ginkgoBlock, fileOrURL string) (ginkgoResult, error)
 	case match[1] == "Failure":
 		status = statusFailed
 	default:
-		return ginkgoResult{}, fmt.Errorf("ginkgo block header: expected 'Failure' or 'Failure in Spec Setup', got: %s", match[1])
+		return parsedGinkgoBlock{}, fmt.Errorf("ginkgo block header: expected 'Failure' or 'Failure in Spec Setup', got: %s", match[1])
 	}
 
 	duration, err := strconv.Atoi(match[2])
 	if err != nil {
-		return ginkgoResult{}, fmt.Errorf("ginkgo block header: expected an integer, got: %s", match[1])
+		return parsedGinkgoBlock{}, fmt.Errorf("ginkgo block header: expected an integer, got: %s", match[1])
 	}
 
 	// Footer.
 	if block.lines[len(block.lines)-1] != "------------------------------" {
-		return ginkgoResult{}, fmt.Errorf("expected the last line to be '------------------------------', block was: %s", strings.Join(block.lines, "\n"))
-	}
-
-	// Now that we know that there is a header and footer, we can determine a
-	// "link to highlight" if this was fetched from a URL, or a file:line if
-	// this was loaded from a file.
-	source := fileOrURL + ":" + strconv.Itoa(block.line)
-	if strings.HasPrefix(fileOrURL, "http://") || strings.HasPrefix(fileOrURL, "https://") {
-		source = fileOrURL + "#line=" + strconv.Itoa(block.line)
+		return parsedGinkgoBlock{}, fmt.Errorf("expected the last line to be '------------------------------', block was: %s", strings.Join(block.lines, "\n"))
 	}
 
 	block.lines = block.lines[1 : len(block.lines)-1]
@@ -396,17 +487,19 @@ func parseGinkgoBlock(block ginkgoBlock, fileOrURL string) (ginkgoResult, error)
 		i += 2
 	}
 	if i == 0 {
-		return ginkgoResult{}, fmt.Errorf("no name line found, remaining was: %s", strings.Join(block.lines, "\n"))
+		return parsedGinkgoBlock{}, fmt.Errorf("no name line found, remaining was: %s", strings.Join(block.lines, "\n"))
 	}
 
 	name := strings.Join(parts, " ")
 
 	// The Err and ErrLoc are optional.
 	if i >= len(block.lines) {
-		return ginkgoResult{
-			Duration: duration,
-			Name:     name,
-			Status:   statusFailed,
+		return parsedGinkgoBlock{
+			name:     name,
+			status:   status,
+			duration: duration,
+			errStr:   "",
+			errLoc:   "",
 		}, nil
 	}
 
@@ -454,28 +547,33 @@ func parseGinkgoBlock(block ginkgoBlock, fileOrURL string) (ginkgoResult, error)
 
 	errStr := strings.Join(block.lines, "\n")
 
-	return ginkgoResult{
-		Duration: duration,
-		Name:     name,
-		Status:   status,
-		Err:      errStr,
-		ErrLoc:   errLoc,
-		Source:   source,
+	return parsedGinkgoBlock{
+		name:     name,
+		status:   status,
+		duration: duration,
+		errStr:   errStr,
+		errLoc:   errLoc,
 	}, nil
 }
 
-var isParen = regexp.MustCompile(" *}$")
+// Return a list of object names, e.g.:
+//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/artifacts/junit__01.xml
+//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/artifacts/junit__02.xml
+//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/build-log.txt
+//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/clone-log.txt
+//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/clone-records.json
+//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/finished.json
+//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/podinfo.json
+//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/prowjob.json
+//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/started.json
+//   pr-logs/pull/jetstack_cert-manager/2/pull-cert-manager-e2e-v1-13/245/build-log.txt...
+func downloadJobArtifactsToCache(bucketName string, numberPastPRs int) error {
+	gcs, err := storage.NewClient(context.Background())
+	if err != nil {
+		return fmt.Errorf("error: Google Cloud storage: %v\n", err)
+	}
+	bucket := gcs.Bucket(bucketName)
 
-// The 'passed' tests are fetched from the jUnit files junit__0x.xml. The
-// 'failed' and 'error' tests are loaded from build-log.txt files. We don't use
-// the 'failed' tests in junit__0x.xml files in order to prevent duplicates with
-// the 'failed' and 'error' that appear in build-log.txt files. The 'skipped'
-// tests are skipped.
-//
-// This function prints three progress bars: one for listing the PR prefixes,
-// one for for fetching the objects (just the attributes), and then a bar to
-// download the junit__0x.xml and build-log.txt files.
-func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]ginkgoResult, error) {
 	bar := pb.NewOptions(int(5 /* seconds */ *5 /* =1/200ms */),
 		pb.OptionSetPredictTime(false),
 		pb.OptionSetWriter(os.Stderr),
@@ -498,9 +596,9 @@ func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]gink
 			_ = bar.RenderBlank()
 		}
 	}()
-	prPrefixes, err := listPRPrefixes(bucket, "pr-logs/pull/jetstack_cert-manager")
+	prPrefixes, err := listPRPrefixes(bucket, bucketPrefix)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list PR prefixes: %v", err)
+		return fmt.Errorf("failed to list PR prefixes: %v", err)
 	}
 	_ = bar.Clear()
 	_ = bar.Finish()
@@ -511,20 +609,17 @@ func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]gink
 		prPrefixes = prPrefixes[len(prPrefixes)-numberPastPRs:]
 	}
 
-	isJunitFile := regexp.MustCompile(`junit__.*\.xml$`)
-	isBuildLogFile := regexp.MustCompile(`build-log\.txt$`)
-	isJunitOrBuildLog := regexp.MustCompile("(" + isJunitFile.String() + "|" + isBuildLogFile.String() + ")")
-
 	// For each PR prefix such as pr-logs/pull/jetstack_cert-manager/4664/,
 	// we fetch all the junit files and build-log.txt files.
-	objects, totalSize, err := listObjectsUnderPrefixes(bucket, prPrefixes, isJunitOrBuildLog)
+	objects, totalSize, err := listObjectsUnderPrefixes(bucket, prPrefixes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list objects under prefixes: %v", err)
+		return fmt.Errorf("failed to list objects under prefixes: %v", err)
 	}
 
 	bar = pb.NewOptions64(totalSize,
 		pb.OptionSetWriter(os.Stderr),
 		pb.OptionSetPredictTime(true),
+		pb.OptionShowCount(),
 		pb.OptionEnableColorCodes(true),
 		pb.OptionShowBytes(true),
 		pb.OptionSetDescription("Downloading logs for each job..."),
@@ -537,48 +632,139 @@ func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]gink
 		}),
 	)
 	_ = bar.RenderBlank()
-	var ginkgoResults []ginkgoResult
 	for _, object := range objects {
-		bytes, err := fetchObject(&object, bucket)
+		err := downloadToCache(&object, bucket)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch %s: %w", object.Name, err)
+			return fmt.Errorf("failed to download jobs artifacts for %s: %w", object.Name, err)
 		}
 		_ = bar.Add64(object.Size)
+	}
+	_ = bar.Clear()
+	_ = bar.Finish()
+
+	return nil
+}
+
+// The "bucket" string in input is used for displaying and logging. It is not
+// used to fetch anything from GCS.
+func parseGinkgoResultsFromCache(bucketName string, bucketPrefix string, numberPastPRs int) ([]ginkgoResult, error) {
+	// Let's only select the last few PRs.
+	artifacts, err := findCachedArtifacts(bucketPrefix, numberPastPRs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find cached artifacts: %v", err)
+	}
+
+	var ginkgoResults []ginkgoResult
+	for _, artifact := range artifacts {
+
+		if !isJunitOrBuildLog.MatchString(artifact) {
+			continue
+		}
+
+		bytes, err := loadFromCache(artifact)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load from file %s, was expected to be already in cache: %w", artifact, err)
+		}
 
 		// The url below is meant for the 'source' field as well as for logging
 		// purposes.
-		url := "https://storage.googleapis.com/" + object.Bucket + "/" + object.Name
+		// https://storage.googleapis.com/jetstack-logs/<object-name>
+		objectName := strings.TrimPrefix(artifact, cacheDir+"/")
+		url := "https://storage.googleapis.com/" + bucketName + "/" + objectName
+		pr, job, build, err := parseObjectName(objectName)
+		if err != nil {
+			return nil, fmt.Errorf("parsing object name %s: %w", objectName, err)
+		}
 
 		switch {
-		case isJunitFile.MatchString(object.Name):
-			parsed, err := parseJunit(bytes)
+		case isJunitFile.MatchString(artifact):
+			parsedBlocks, err := parseJunit(bytes)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse junit file %s: %w", url, err)
 			}
-			ginkgoResults = append(ginkgoResults, parsed...)
-		case isBuildLogFile.MatchString(object.Name):
+
+			for _, parsed := range parsedBlocks {
+				ginkgoResults = append(ginkgoResults, ginkgoResult{
+					Name:     parsed.name,
+					Duration: parsed.duration,
+					Status:   parsed.status,
+					Err:      parsed.errStr,
+					ErrLoc:   parsed.errLoc,
+					Source:   url, // No line indication for junit files.
+					PR:       pr,
+					Job:      job,
+					Build:    build,
+				})
+			}
+
+		case isBuildLogFile.MatchString(artifact):
 			blocks, err := parseBuildLog(bytes)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse build-log.txt file %s: %w", url, err)
 			}
 
 			for _, block := range blocks {
-				// https://storage.googleapis.com/jetstack-logs/<object-name>
-
-				result, err := parseGinkgoBlock(block, url)
+				parsed, err := parseGinkgoBlock(block, url)
 				if err != nil {
 					return nil, fmt.Errorf("failed to parse ginkgo block at line %d in %s: %w", block.line, url, err)
 				}
-				ginkgoResults = append(ginkgoResults, result)
+
+				ginkgoResults = append(ginkgoResults, ginkgoResult{
+					Name:     parsed.name,
+					Duration: parsed.duration,
+					Status:   parsed.status,
+					Err:      parsed.errStr,
+					ErrLoc:   parsed.errLoc,
+					Source:   url + "#line=" + strconv.Itoa(block.line),
+					PR:       pr,
+					Job:      job,
+					Build:    build,
+				})
 			}
 		default:
 			return nil, fmt.Errorf("developer mistake: expected name %s but got %s", isJunitOrBuildLog.String(), url)
 		}
 	}
-	_ = bar.Clear()
-	_ = bar.Finish()
-
 	return ginkgoResults, nil
+}
+
+func findCachedArtifacts(bucketPrefix string, numberPastPRs int) ([]string, error) {
+	prDirEntries, err := os.ReadDir(cacheDir + "/" + bucketPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read current directory: %v", err)
+	}
+
+	var prDirs []string
+	for _, dirEntry := range prDirEntries {
+		if !dirEntry.IsDir() {
+			continue
+		}
+		prDirs = append(prDirs, cacheDir+"/"+bucketPrefix+"/"+dirEntry.Name())
+	}
+
+	prDirs, err = numericalSortPRs(prDirs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sort PR prefixes: %w", err)
+	}
+
+	if len(prDirs) > numberPastPRs {
+		prDirs = prDirs[len(prDirs)-numberPastPRs:]
+	}
+
+	var artifacts []string
+	for _, prDir := range prDirs {
+		err := filepath.Walk(prDir, func(path string, _ os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			artifacts = append(artifacts, path)
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to recurse into %s: %w", prDir, err)
+		}
+	}
+	return artifacts, nil
 }
 
 type StatsMaxDuration struct {
@@ -667,13 +853,13 @@ func computeStatsMaxDuration(results []ginkgoResult) []StatsMaxDuration {
 //   pr-logs/pull/jetstack_cert-manager/1017/pull-cert-manager-e2e-v1-13/231/artifacts/junit__02.xml
 //   pr-logs/pull/jetstack_cert-manager/1017/pull-cert-manager-e2e-v1-13/231/artifacts/junit__10.xml
 //   <----------- prPrefix ----------------->
-func listObjectsUnderPrefixes(bucket *storage.BucketHandle, prPrefixes []string, only *regexp.Regexp) ([]storage.ObjectAttrs, int64, error) {
+func listObjectsUnderPrefixes(bucket *storage.BucketHandle, prPrefixes []string) ([]storage.ObjectAttrs, int64, error) {
 	var objects []storage.ObjectAttrs
 	totalSize := int64(0)
 
 	bar := pb.NewOptions(len(prPrefixes),
 		pb.OptionSetWriter(os.Stderr),
-		pb.OptionSetPredictTime(true),
+		pb.OptionSetPredictTime(false),
 		pb.OptionEnableColorCodes(true),
 		pb.OptionShowBytes(false),
 		pb.OptionSetDescription("Listing jobs for each PR prefix..."),
@@ -705,10 +891,6 @@ func listObjectsUnderPrefixes(bucket *storage.BucketHandle, prPrefixes []string,
 				return nil, 0, fmt.Errorf("failed to iterate over GCS objects: %s: %w", object.Name, err)
 			}
 
-			if !only.MatchString(object.Name) {
-				continue
-			}
-
 			totalSize += object.Size
 
 			// Why "*object"? No one else is going to touch the
@@ -725,13 +907,13 @@ func listObjectsUnderPrefixes(bucket *storage.BucketHandle, prPrefixes []string,
 // The "skipped", "failed", and "error" tests are not taken into account. Only
 // the and "passed" are dealt with. The "failed" and "error" results are to be
 // fetched from build-log.txt files.
-func parseJunit(bytes []byte) ([]ginkgoResult, error) {
+func parseJunit(bytes []byte) ([]parsedGinkgoBlock, error) {
 	suites, err := junit.Ingest(bytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ingest junit XML: %w", err)
 	}
 
-	var results []ginkgoResult
+	var results []parsedGinkgoBlock
 	for _, suite := range suites {
 		for _, test := range suite.Tests {
 			var s status
@@ -742,10 +924,14 @@ func parseJunit(bytes []byte) ([]ginkgoResult, error) {
 				continue
 			}
 
-			results = append(results, ginkgoResult{
-				Duration: int(test.Duration.Seconds()),
-				Status:   s,
-				Name:     test.Name,
+			results = append(results, parsedGinkgoBlock{
+				name: test.Name,
+				// Anything lower than 1s should appear as "0s" since we don't
+				// care about fast tests.
+				duration: int(math.Floor(test.Duration.Seconds())),
+				status:   s,
+				errStr:   "",
+				errLoc:   "",
 			})
 		}
 	}
@@ -772,8 +958,6 @@ func listPRPrefixes(bucket *storage.BucketHandle, prefix string) ([]string, erro
 		prefix += "/"
 	}
 
-	endsWithPRNumber := regexp.MustCompile(`/(\d+)/$`)
-
 	prIter := bucket.Objects(context.Background(), &storage.Query{
 		Prefix: prefix, Delimiter: "/", Projection: storage.ProjectionNoACL,
 	})
@@ -795,6 +979,15 @@ func listPRPrefixes(bucket *storage.BucketHandle, prefix string) ([]string, erro
 		prPrefixes = append(prPrefixes, pr.Prefix)
 	}
 
+	prPrefixes, err := numericalSortPRs(prPrefixes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sort PR prefixes: %w", err)
+	}
+
+	return prPrefixes, nil
+}
+
+func numericalSortPRs(prPrefixes []string) ([]string, error) {
 	// Sorting with strings.Compare would yield a lexicographical order of the
 	// prPrefixes, it would look like this::
 	//
@@ -836,48 +1029,86 @@ func listPRPrefixes(bucket *storage.BucketHandle, prefix string) ([]string, erro
 	return prPrefixes, nil
 }
 
-// fetchObject fetches the object from GCS and stores it in ~/.cache/prowdig/.
+// Get an object from the cache. No checksum is performed. It is assumed that
+// downloadToCache was previously run. The name is expected to look like this:
+//
+//  pr-logs/pull/jetstack_cert-manager/1/build-log.txt
+func loadFromCache(filePath string) ([]byte, error) {
+	bytes, err := ioutil.ReadFile(filePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%s does not exist in the cache: %v", filePath, err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to load a job artifact from cache: %s: %w", filePath, err)
+	}
+	return bytes, nil
+}
+
+// downloadToCache fetches the object from GCS and stores it in ~/.cache/prowdig/.
 // If the object is already in the cache and its CRC32 sum matches the one in
 // GCS, the cached object is returned. If the CRC32 sum does not match, the
 // object is re-downloaded.
-func fetchObject(file *storage.ObjectAttrs, bucket *storage.BucketHandle) ([]byte, error) {
-	var bytes []byte
-	cachedFile := os.Getenv("HOME") + "/.cache/prowdig/" + file.Name
-	if _, err := os.Stat(cachedFile); err == nil {
-		bytes, err = ioutil.ReadFile(os.Getenv("HOME") + "/.cache/prowdig/" + file.Name)
+func downloadToCache(object *storage.ObjectAttrs, bucket *storage.BucketHandle) error {
+	filePath := cacheDir + "/" + object.Name
+	if _, err := os.Stat(filePath); err == nil {
+		bytes, err := ioutil.ReadFile(filePath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read from cache: %s: %w", file.Name, err)
+			return fmt.Errorf("failed to read from cache: %s: %w", object.Name, err)
 		}
 
-		if crc32.Checksum(bytes, crc32.MakeTable(crc32.Castagnoli)) == file.CRC32C {
+		if crc32.Checksum(bytes, crc32.MakeTable(crc32.Castagnoli)) == object.CRC32C {
 			// We have hit the cache!
-			return bytes, nil
+			return nil
 		}
 
-		fmt.Fprintf(os.Stderr, "warning: checksum for cache file %s does not match, it will be re-downloaded\n", cachedFile)
+		fmt.Fprintf(os.Stderr, "warning: checksum for cache file %s does not match, it will be re-downloaded\n", filePath)
 	}
 
-	reader, err := bucket.Object(file.Name).NewReader(context.Background())
+	reader, err := bucket.Object(object.Name).NewReader(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("failed to read GCS object: %s: %w", file.Name, err)
+		return fmt.Errorf("failed to read GCS object: %s: %w", object.Name, err)
 	}
 
-	bytes, err = ioutil.ReadAll(reader)
+	bytes, err := ioutil.ReadAll(reader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read GCS object: %s: %w", file.Name, err)
+		return fmt.Errorf("failed to read GCS object: %s: %w", object.Name, err)
 	}
 
-	err = os.MkdirAll(path.Dir(cachedFile), 0755)
+	err = os.MkdirAll(path.Dir(filePath), 0755)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create cache dir: %w", err)
+		return fmt.Errorf("failed to create cache dir: %w", err)
 	}
 
-	err = ioutil.WriteFile(cachedFile, bytes, 0644)
+	err = ioutil.WriteFile(filePath, bytes, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("failed to write to cache: %s: %w", file.Name, err)
+		return fmt.Errorf("failed to write to cache: %s: %w", object.Name, err)
 	}
 
-	return bytes, nil
+	return nil
+}
+
+//  pr-logs/pull/jetstack_cert-manager/4664/pull-cert-manager-e2e-v1-13/14356/artifacts/junit__01.xml
+//                                     <--> <-------------------------> <--->
+// 									 pr number        job name       build number
+func parseObjectName(objectName string) (pr int, job string, build int, err error) {
+	matches := reObjectName.FindStringSubmatch(objectName)
+	if len(matches) != 4 {
+		return 0, "", 0, fmt.Errorf("failed to parse object name, expected %s but got: %s", reObjectName.String(), os.Args[1])
+	}
+
+	pr, err = strconv.Atoi(matches[1])
+	if err != nil {
+		return 0, "", 0, fmt.Errorf("developer mistake: 1st capture in %s got: %s", reObjectName.String(), os.Args[1])
+	}
+
+	job = matches[2]
+
+	build, err = strconv.Atoi(matches[3])
+	if err != nil {
+		return 0, "", 0, fmt.Errorf("developer mistake: 1st capture in %s got: %s", reObjectName.String(), os.Args[1])
+	}
+
+	return pr, job, build, nil
 }
 
 func green(s string) string {
