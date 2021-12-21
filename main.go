@@ -20,7 +20,7 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/alecthomas/kong"
 	"github.com/joshdk/go-junit"
-	"github.com/schollz/progressbar/v3"
+	pb "github.com/schollz/progressbar/v3"
 	"google.golang.org/api/iterator"
 )
 
@@ -29,6 +29,9 @@ type status string
 const (
 	statusPassed status = "passed"
 	statusFailed status = "failed"
+
+	// When the test setup failed, e.g. during BeforeEach.
+	statusError status = "error"
 )
 
 // Watch out, one test case outcome may appear twice in the array of testcases.
@@ -43,8 +46,8 @@ type ginkgoResult struct {
 	// "passed". The "skipped" statuses are not dealt with in prowdig.
 	Status status `json:"status"`
 
-	// The Duration of the test case.
-	Duration time.Duration `json:"duration"`
+	// The Duration of the test case in seconds.
+	Duration int `json:"duration"`
 
 	// (optional) The error message shown right before the keyword 'occurred' at
 	// the bottom of the ginkgo block.
@@ -52,19 +55,31 @@ type ginkgoResult struct {
 
 	// (optional) The Go file and line number where the error message was found,
 	// e.g., "test/e2e/suite/secrettemplate/secrettemplate.go:202".
-	ErrLocation string `json:"errLocation"`
+	ErrLoc string `json:"errLoc"`
+
+	// (optional) The file path or URL to the build-log.txt file where this
+	// error was found. Will be either:
+	//
+	//
+	// https://storage.googleapis.com/jetstack-logs/pr-logs/pull/.../build-log.txt
+	Source string `json:"source"`
 }
 
 var CLI struct {
 	ParseLogs struct {
 		Output    string `output:" Output format." short:"o" default:"text" enum:"text,json"`
 		FileOrURL string `arg:"" help:"Log file or URL to be parsed for Ginkgo blocks."`
-	} `cmd:"" help:"Parse a build-log.txt file that contains Ginkgo output."`
+	} `cmd:"" help:"Parse the Ginkgo failure blocks from a given file or URL."`
+
+	List struct {
+		Output string `output:" Output format." short:"o" default:"text" enum:"text,json"`
+		Limit  int    `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+	} `cmd:"" help:"Lists all the test results ordered by name. The logs are fetched from the bucket."`
 
 	MaxDuration struct {
 		Output string `output:" Output format." short:"o" default:"text" enum:"text,json"`
 		Limit  int    `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
-	} `cmd:"" help:"Prints the maximum 'passed' duration vs. maximum 'failed' duration of each test. The logs are fetched from the bucket."`
+	} `cmd:"" help:"Lists the maximum 'passed' duration vs. maximum 'failed' duration of each test order by name. The logs are fetched from the bucket."`
 }
 
 func main() {
@@ -104,7 +119,7 @@ func main() {
 		// "[]" instead of "null".
 		results := []ginkgoResult{}
 		for _, block := range blocks {
-			res, err := parseGinkgoBlock(block)
+			res, err := parseGinkgoBlock(block, CLI.ParseLogs.FileOrURL)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: parsing one of the ginkgo blocks: %v\n", err)
 			}
@@ -126,9 +141,9 @@ func main() {
 			for _, res := range results {
 				switch res.Status {
 				case statusPassed:
-					fmt.Printf("%s\t%s\n", green(res.Duration.String()), res.Name)
+					fmt.Printf("%s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.Name)
 				case statusFailed:
-					fmt.Printf("%s\t%s: %s\n", red(res.Duration.String()), res.Name, res.Err)
+					fmt.Printf("%s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
 				}
 			}
 		default:
@@ -144,13 +159,13 @@ func main() {
 		}
 		bucket := gcs.Bucket("jetstack-logs")
 
-		testcases, err := fetchGinkgoResults(bucket, CLI.MaxDuration.Limit)
+		ginkgoResults, err := fetchGinkgoResults(bucket, CLI.MaxDuration.Limit)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to fetch testcases: %v\n", err)
+			fmt.Fprintf(os.Stderr, "failed to fetch Ginkgo test results: %v\n", err)
 			os.Exit(1)
 		}
 
-		stats := computeStatsMaxDuration(testcases)
+		stats := computeStatsMaxDuration(ginkgoResults)
 		switch CLI.MaxDuration.Output {
 		case "json":
 			if stats == nil {
@@ -164,8 +179,8 @@ func main() {
 		case "text":
 			for _, stat := range stats {
 				fmt.Printf("%s\t%s\t%s\n",
-					green(stat.MaxDurationSuccess.Truncate(1*time.Second).String()),
-					red(stat.MaxDurationFailed.Truncate(1*time.Second).String()),
+					green((time.Duration(stat.MaxDurationSuccess) * time.Second).String()),
+					red((time.Duration(stat.MaxDurationSuccess) * time.Second).String()),
 					stat.Name,
 				)
 			}
@@ -174,6 +189,50 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
+
+	case "list":
+		gcs, err := storage.NewClient(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: Google Cloud storage: %v\n", err)
+			os.Exit(1)
+		}
+		bucket := gcs.Bucket("jetstack-logs")
+
+		results, err := fetchGinkgoResults(bucket, CLI.List.Limit)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to fetch testcases: %v\n", err)
+			os.Exit(1)
+		}
+
+		sort.Slice(results, func(i, j int) bool {
+			return strings.Compare(results[i].Name, results[j].Name) < 0
+		})
+
+		switch CLI.List.Output {
+		case "json":
+			if results == nil {
+				// Force the encoded JSON to show "[]" instead of "null".
+				results = []ginkgoResult{}
+			}
+			err = json.NewEncoder(os.Stdout).Encode(results)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			}
+		case "text":
+			for _, res := range results {
+				switch res.Status {
+				case statusPassed:
+					fmt.Printf("%s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.Name)
+				case statusFailed:
+					fmt.Printf("%s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+				}
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
 	default:
 		panic(kongctx.Command())
 	}
@@ -206,6 +265,8 @@ type ginkgoBlock struct {
 	// '• Failure [301.437 seconds]'. It does not include the ending marker
 	// '------------------------------'.
 	lines []string
+
+	source string
 }
 
 // The function parseBuildLog parses the content of a build-log.txt file and
@@ -249,14 +310,14 @@ func parseBuildLog(buildLog []byte) ([]ginkgoBlock, error) {
 	return blocks, nil
 }
 
-var reGingkoBlockHeader = regexp.MustCompile(`• Failure \[(\d+)\.\d+ `)
+var reGingkoBlockHeader = regexp.MustCompile(`• (Failure|Failure in Spec Setup.*) \[(\d+)\.\d+ `)
 
 // The parseGinkgoBlock function parses the body of one ginkgo block, as defined
 // in the diagram above the ginkgoBlock struct.
 //
 // Note that the "[It]" suffixes are removed from the test names in order to
 // match the test name given in junit__0x.xml files.
-func parseGinkgoBlock(block ginkgoBlock) (ginkgoResult, error) {
+func parseGinkgoBlock(block ginkgoBlock, fileOrURL string) (ginkgoResult, error) {
 	if len(block.lines) < 2 {
 		return ginkgoResult{}, fmt.Errorf("a ginkgo block is at least 2 lines long, got: %s", strings.Join(block.lines, "\n"))
 	}
@@ -281,19 +342,36 @@ func parseGinkgoBlock(block ginkgoBlock) (ginkgoResult, error) {
 
 	// Header.
 	match := reGingkoBlockHeader.FindStringSubmatch(block.lines[0])
-	if len(match) != 2 {
+	if len(match) != 3 {
 		return ginkgoResult{}, fmt.Errorf("ginkgo block header: expected %s, got: %s", reGingkoBlockHeader, block.lines[0])
 	}
-	seconds, err := strconv.Atoi(match[1])
+
+	var status status
+	switch {
+	case strings.HasPrefix(match[1], "Failure in Spec Setup"):
+		status = statusError
+	case match[1] == "Failure":
+		status = statusFailed
+	default:
+		return ginkgoResult{}, fmt.Errorf("ginkgo block header: expected 'Failure' or 'Failure in Spec Setup', got: %s", match[1])
+	}
+
+	duration, err := strconv.Atoi(match[2])
 	if err != nil {
 		return ginkgoResult{}, fmt.Errorf("ginkgo block header: expected an integer, got: %s", match[1])
 	}
 
-	duration := time.Duration(seconds) * time.Second
-
 	// Footer.
 	if block.lines[len(block.lines)-1] != "------------------------------" {
 		return ginkgoResult{}, fmt.Errorf("expected the last line to be '------------------------------', block was: %s", strings.Join(block.lines, "\n"))
+	}
+
+	// Now that we know that there is a header and footer, we can determine a
+	// "link to highlight" if this was fetched from a URL, or a file:line if
+	// this was loaded from a file.
+	source := fileOrURL + ":" + strconv.Itoa(block.line)
+	if strings.HasPrefix(fileOrURL, "http://") || strings.HasPrefix(fileOrURL, "https://") {
+		source = fileOrURL + "#line=" + strconv.Itoa(block.line)
 	}
 
 	block.lines = block.lines[1 : len(block.lines)-1]
@@ -369,30 +447,34 @@ func parseGinkgoBlock(block ginkgoBlock) (ginkgoResult, error) {
 	errStr := strings.Join(block.lines, "\n")
 
 	return ginkgoResult{
-		Duration:    duration,
-		Name:        name,
-		Status:      statusFailed,
-		Err:         errStr,
-		ErrLocation: errLoc,
+		Duration: duration,
+		Name:     name,
+		Status:   status,
+		Err:      errStr,
+		ErrLoc:   errLoc,
+		Source:   source,
 	}, nil
 }
 
 var isParen = regexp.MustCompile(" *}$")
 
-// Beware the duplicates!! One test case for a given job may appear in both a
-// junit file and in the build-log.txt. We do not de-duplicate them at the
-// moment.
+// The 'passed' tests are fetched from the jUnit files junit__0x.xml. The
+// 'failed' and 'error' tests are loaded from build-log.txt files. We don't use
+// the 'failed' tests in junit__0x.xml files in order to prevent duplicates with
+// the 'failed' and 'error' that appear in build-log.txt files. The 'skipped'
+// tests are skipped.
 //
-// This function prints two progress bars: one for for fetching the objects
-// (just the attributes), and then a bar to download the XML and build-log.txt
-// files.
+// This function prints three progress bars: one for listing the PR prefixes,
+// one for for fetching the objects (just the attributes), and then a bar to
+// download the junit__0x.xml and build-log.txt files.
 func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]ginkgoResult, error) {
-	bar := progressbar.NewOptions(int(5 /* seconds */ *5 /* =1/200ms */),
-		progressbar.OptionSetPredictTime(false),
-		progressbar.OptionEnableColorCodes(true),
-		progressbar.OptionShowBytes(false),
-		progressbar.OptionSetDescription("Listing all PRs..."),
-		progressbar.OptionSetTheme(progressbar.Theme{
+	bar := pb.NewOptions(int(5 /* seconds */ *5 /* =1/200ms */),
+		pb.OptionSetPredictTime(false),
+		pb.OptionSetWriter(os.Stderr),
+		pb.OptionEnableColorCodes(true),
+		pb.OptionShowBytes(false),
+		pb.OptionSetDescription("Listing all PRs..."),
+		pb.OptionSetTheme(pb.Theme{
 			Saucer:        "[green]=[reset]",
 			SaucerHead:    "[green]>[reset]",
 			SaucerPadding: " ",
@@ -432,12 +514,13 @@ func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]gink
 		return nil, fmt.Errorf("failed to list objects under prefixes: %v", err)
 	}
 
-	bar = progressbar.NewOptions64(totalSize,
-		progressbar.OptionSetPredictTime(true),
-		progressbar.OptionEnableColorCodes(true),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionSetDescription("Downloading logs for each job..."),
-		progressbar.OptionSetTheme(progressbar.Theme{
+	bar = pb.NewOptions64(totalSize,
+		pb.OptionSetWriter(os.Stderr),
+		pb.OptionSetPredictTime(true),
+		pb.OptionEnableColorCodes(true),
+		pb.OptionShowBytes(true),
+		pb.OptionSetDescription("Downloading logs for each job..."),
+		pb.OptionSetTheme(pb.Theme{
 			Saucer:        "[green]=[reset]",
 			SaucerHead:    "[green]>[reset]",
 			SaucerPadding: " ",
@@ -454,28 +537,34 @@ func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]gink
 		}
 		_ = bar.Add64(object.Size)
 
+		// The url below is meant for the 'source' field as well as for logging
+		// purposes.
+		url := "https://storage.googleapis.com/" + object.Bucket + "/" + object.Name
+
 		switch {
 		case isJunitFile.MatchString(object.Name):
 			parsed, err := parseJunit(bytes)
 			if err != nil {
-				return nil, fmt.Errorf("failed to parse junit file %s: %w", object.Name, err)
+				return nil, fmt.Errorf("failed to parse junit file %s: %w", url, err)
 			}
 			ginkgoResults = append(ginkgoResults, parsed...)
 		case isBuildLogFile.MatchString(object.Name):
 			blocks, err := parseBuildLog(bytes)
 			if err != nil {
-				return nil, fmt.Errorf("failed to parse build-log.txt file %s: %w", object.Name, err)
+				return nil, fmt.Errorf("failed to parse build-log.txt file %s: %w", url, err)
 			}
 
 			for _, block := range blocks {
-				testcase, err := parseGinkgoBlock(block)
+				// https://storage.googleapis.com/jetstack-logs/<object-name>
+
+				result, err := parseGinkgoBlock(block, url)
 				if err != nil {
-					return nil, fmt.Errorf("failed to parse ginkgo block at line %d: %w", block.line, err)
+					return nil, fmt.Errorf("failed to parse ginkgo block at line %d in %s: %w", block.line, url, err)
 				}
-				ginkgoResults = append(ginkgoResults, testcase)
+				ginkgoResults = append(ginkgoResults, result)
 			}
 		default:
-			return nil, fmt.Errorf("developer mistake: expected name %s but got %s", isJunitOrBuildLog.String(), object.Name)
+			return nil, fmt.Errorf("developer mistake: expected name %s but got %s", isJunitOrBuildLog.String(), url)
 		}
 	}
 	_ = bar.Clear()
@@ -486,37 +575,37 @@ func fetchGinkgoResults(bucket *storage.BucketHandle, numberPastPRs int) ([]gink
 
 type StatsMaxDuration struct {
 	Name               string
-	MaxDurationSuccess time.Duration
-	MaxDurationFailed  time.Duration
+	MaxDurationSuccess int
+	MaxDurationFailed  int
 }
 
-func computeStatsMaxDuration(testcases []ginkgoResult) []StatsMaxDuration {
+func computeStatsMaxDuration(results []ginkgoResult) []StatsMaxDuration {
 	type max struct {
-		success time.Duration
-		failed  time.Duration
+		success int
+		failed  int
 	}
 
 	// The key is the test name.
 	maxMap := make(map[string]max)
 
 	var testNames []string
-	for _, testcase := range testcases {
-		if _, ok := maxMap[testcase.Name]; !ok {
-			testNames = append(testNames, testcase.Name)
-			maxMap[testcase.Name] = max{success: 0, failed: 0}
+	for _, test := range results {
+		if _, ok := maxMap[test.Name]; !ok {
+			testNames = append(testNames, test.Name)
+			maxMap[test.Name] = max{success: 0, failed: 0}
 		}
-		cur := maxMap[testcase.Name]
-		switch testcase.Status {
+		cur := maxMap[test.Name]
+		switch test.Status {
 		case statusPassed:
-			if cur.success < testcase.Duration {
-				cur.success = testcase.Duration
+			if cur.success < test.Duration {
+				cur.success = test.Duration
 			}
 		case statusFailed:
-			if cur.failed < testcase.Duration {
-				cur.failed = testcase.Duration
+			if cur.failed < test.Duration {
+				cur.failed = test.Duration
 			}
 		}
-		maxMap[testcase.Name] = cur
+		maxMap[test.Name] = cur
 	}
 
 	// If there has been no failure, then we cannot say anything about the
@@ -574,12 +663,13 @@ func listObjectsUnderPrefixes(bucket *storage.BucketHandle, prPrefixes []string,
 	var objects []storage.ObjectAttrs
 	totalSize := int64(0)
 
-	bar := progressbar.NewOptions(len(prPrefixes),
-		progressbar.OptionSetPredictTime(true),
-		progressbar.OptionEnableColorCodes(true),
-		progressbar.OptionShowBytes(false),
-		progressbar.OptionSetDescription("Listing jobs for each PR prefix..."),
-		progressbar.OptionSetTheme(progressbar.Theme{
+	bar := pb.NewOptions(len(prPrefixes),
+		pb.OptionSetWriter(os.Stderr),
+		pb.OptionSetPredictTime(true),
+		pb.OptionEnableColorCodes(true),
+		pb.OptionShowBytes(false),
+		pb.OptionSetDescription("Listing jobs for each PR prefix..."),
+		pb.OptionSetTheme(pb.Theme{
 			Saucer:        "[green]=[reset]",
 			SaucerHead:    "[green]>[reset]",
 			SaucerPadding: " ",
@@ -624,35 +714,34 @@ func listObjectsUnderPrefixes(bucket *storage.BucketHandle, prPrefixes []string,
 	return objects, totalSize, nil
 }
 
-// The "skipped" tests are not taken into account. Only the "failed", "error"
-// and "passed" are dealt with.
+// The "skipped", "failed", and "error" tests are not taken into account. Only
+// the and "passed" are dealt with. The "failed" and "error" results are to be
+// fetched from build-log.txt files.
 func parseJunit(bytes []byte) ([]ginkgoResult, error) {
 	suites, err := junit.Ingest(bytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ingest junit XML: %w", err)
 	}
 
-	var testcases []ginkgoResult
+	var results []ginkgoResult
 	for _, suite := range suites {
 		for _, test := range suite.Tests {
 			var s status
 			switch test.Status {
 			case "passed":
 				s = statusPassed
-			case "failed", "error":
-				s = statusFailed
-			case "skipped":
+			case "skipped", "failed", "error":
 				continue
 			}
 
-			testcases = append(testcases, ginkgoResult{
-				Duration: test.Duration,
+			results = append(results, ginkgoResult{
+				Duration: int(test.Duration.Seconds()),
 				Status:   s,
 				Name:     test.Name,
 			})
 		}
 	}
-	return testcases, nil
+	return results, nil
 }
 
 // Returns the numerically ordered pull request prefixes. Prefixes that do not

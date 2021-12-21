@@ -3,47 +3,60 @@ package main
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func Test_reGinkgoBlock(t *testing.T) {
-	block, err := parseGinkgoBlock(ginkgoBlock{line: 42, lines: strings.Split(exampleGingkoBlock1, "\n")})
+	block, err := parseGinkgoBlock(ginkgoBlock{line: 42, lines: strings.Split(exampleGingkoBlock1, "\n")}, "https://foo.bar/build-log.txt")
 	assert.NoError(t, err)
 	assert.Equal(t, ginkgoResult{
-		Name:        "[cert-manager] Approval CertificateRequests a service account with the approve permissions for cluster scoped issuers.example.io/* should be able to deny requests",
-		Status:      "failed",
-		Duration:    0 * time.Second,
-		Err:         "admission webhook \"webhook.cert-manager.io\" denied the request: spec.issuerRef: Forbidden: referenced signer resource does not exist: {test-issuer Issuer bycbn.example.io}",
-		ErrLocation: "test/e2e/suite/approval/approval.go:233",
+		Name:     "[cert-manager] Approval CertificateRequests a service account with the approve permissions for cluster scoped issuers.example.io/* should be able to deny requests",
+		Status:   "failed",
+		Duration: 0,
+		Err:      "admission webhook \"webhook.cert-manager.io\" denied the request: spec.issuerRef: Forbidden: referenced signer resource does not exist: {test-issuer Issuer bycbn.example.io}",
+		ErrLoc:   "test/e2e/suite/approval/approval.go:233",
+		Source:   "https://foo.bar/build-log.txt#line=42",
 	}, block)
 
-	block, err = parseGinkgoBlock(ginkgoBlock{line: 123, lines: strings.Split(exampleGingkoBlock2, "\n")})
+	block, err = parseGinkgoBlock(ginkgoBlock{line: 123, lines: strings.Split(exampleGingkoBlock2, "\n")}, "/file/build-log.txt")
 	assert.NoError(t, err)
 	assert.Equal(t, ginkgoResult{
-		Name:        "[Conformance] Certificates with issuer type SelfSigned ClusterIssuer should issue an ECDSA, defaulted certificate for a single distinct DNS Name",
-		Status:      "failed",
-		Duration:    301 * time.Second,
-		Err:         "timed out waiting for the condition",
-		ErrLocation: "test/e2e/suite/conformance/certificates/tests.go:149",
+		Name:     "[Conformance] Certificates with issuer type SelfSigned ClusterIssuer should issue an ECDSA, defaulted certificate for a single distinct DNS Name",
+		Status:   "failed",
+		Duration: 301,
+		Err:      "timed out waiting for the condition",
+		ErrLoc:   "test/e2e/suite/conformance/certificates/tests.go:149",
+		Source:   "/file/build-log.txt:123",
 	}, block)
 
-	block, err = parseGinkgoBlock(ginkgoBlock{line: 123, lines: strings.Split(exampleGingkoBlock3, "\n")})
+	block, err = parseGinkgoBlock(ginkgoBlock{line: 456, lines: strings.Split(exampleGingkoBlock3, "\n")}, "/file/build-log.txt")
 	assert.NoError(t, err)
 	assert.Equal(t, ginkgoResult{
-		Name:        "[cert-manager] Certificate SecretTemplate should update the values of keys that have been modified in the SecretTemplate",
-		Status:      "failed",
-		Duration:    6 * time.Second,
-		Err:         "Timed out after 5.000s.\nExpected\n    <map[string]string | len:10>: {\n        \"foo\": \"bar\",\n        \"bar\": \"foo\",\n        \"cert-manager.io/ip-sans\": \"\",\n        \"cert-manager.io/issuer-group\": \"cert-manager.io\",\n        \"cert-manager.io/issuer-kind\": \"Issuer\",\n        \"cert-manager.io/issuer-name\": \"certificate-secret-template\",\n        \"cert-manager.io/uri-sans\": \"\",\n        \"cert-manager.io/alt-names\": \"\",\n        \"cert-manager.io/certificate-name\": \"test-secret-template-qbwsc\",\n        \"cert-manager.io/common-name\": \"test\",\n    }\nto have {key: value}\n    <map[interface {}]interface {} | len:1>: {\n        <string>\"foo\": <string>\"123\",\n    }",
-		ErrLocation: "test/e2e/suite/secrettemplate/secrettemplate.go:202",
+		Name:     "[cert-manager] Certificate SecretTemplate should update the values of keys that have been modified in the SecretTemplate",
+		Status:   "failed",
+		Duration: 6,
+		Err:      "Timed out after 5.000s.\nExpected\n    <map[string]string | len:10>: {\n        \"foo\": \"bar\",\n        \"bar\": \"foo\",\n        \"cert-manager.io/ip-sans\": \"\",\n        \"cert-manager.io/issuer-group\": \"cert-manager.io\",\n        \"cert-manager.io/issuer-kind\": \"Issuer\",\n        \"cert-manager.io/issuer-name\": \"certificate-secret-template\",\n        \"cert-manager.io/uri-sans\": \"\",\n        \"cert-manager.io/alt-names\": \"\",\n        \"cert-manager.io/certificate-name\": \"test-secret-template-qbwsc\",\n        \"cert-manager.io/common-name\": \"test\",\n    }\nto have {key: value}\n    <map[interface {}]interface {} | len:1>: {\n        <string>\"foo\": <string>\"123\",\n    }",
+		ErrLoc:   "test/e2e/suite/secrettemplate/secrettemplate.go:202",
+		Source:   "/file/build-log.txt:456",
 	}, block)
+
+	block, err = parseGinkgoBlock(ginkgoBlock{line: 789, lines: strings.Split(exampleGingkoBlock4, "\n")}, "/file/build-log.txt")
+	assert.NoError(t, err)
+	assert.Equal(t, ginkgoResult(ginkgoResult{
+		Name:     "[cert-manager] ACME CertificateRequest (HTTP01) should automatically recreate challenge pod and still obtain a certificate if it is manually deleted [BeforeEach]",
+		Status:   "error",
+		Duration: 61,
+		Err:      "timed out waiting for the condition",
+		ErrLoc:   "test/e2e/suite/issuers/acme/certificaterequest/http01.go:93",
+		Source:   "/file/build-log.txt:789",
+	}), block)
 }
 
 func Test_parseBuildLog(t *testing.T) {
 	blocks, err := parseBuildLog([]byte(exampleBuildLog))
 	assert.NoError(t, err)
-	assert.Len(t, blocks, 5)
+	assert.Len(t, blocks, 6)
 
 	assert.Equal(t, 18, blocks[0].line)
 	assert.Equal(t, []string{
@@ -172,6 +185,25 @@ func Test_parseBuildLog(t *testing.T) {
 		"  test/e2e/suite/issuers/vault/issuer.go:200",
 		"------------------------------",
 	}, blocks[4].lines)
+
+	assert.Equal(t, 137, blocks[5].line)
+	assert.Equal(t, []string{
+		"• Failure in Spec Setup (BeforeEach) [61.637 seconds]",
+		"[cert-manager] ACME CertificateRequest (HTTP01)",
+		"test/e2e/framework/framework.go:283",
+		"  should automatically recreate challenge pod and still obtain a certificate if it is manually deleted [BeforeEach]",
+		"  test/e2e/suite/issuers/acme/certificaterequest/http01.go:207",
+		"",
+		"  Unexpected error:",
+		"      <*errors.errorString | 0xc000234850>: {",
+		"          s: \"timed out waiting for the condition\",",
+		"      }",
+		"      timed out waiting for the condition",
+		"  occurred",
+		"",
+		"  test/e2e/suite/issuers/acme/certificaterequest/http01.go:93",
+		"------------------------------",
+	}, blocks[5].lines)
 }
 
 const exampleBuildLog = `
@@ -296,6 +328,21 @@ test/e2e/framework/framework.go:283
 
   test/e2e/suite/issuers/vault/issuer.go:200
 [90m------------------------------[0m
+[91m[1m• Failure in Spec Setup (BeforeEach) [61.637 seconds][0m
+[cert-manager] ACME CertificateRequest (HTTP01)
+[90mtest/e2e/framework/framework.go:283[0m
+  [91m[1mshould automatically recreate challenge pod and still obtain a certificate if it is manually deleted [BeforeEach][0m
+  [90mtest/e2e/suite/issuers/acme/certificaterequest/http01.go:207[0m
+
+  [91mUnexpected error:
+      <*errors.errorString | 0xc000234850>: {
+          s: "timed out waiting for the condition",
+      }
+      timed out waiting for the condition
+  occurred[0m
+
+  test/e2e/suite/issuers/acme/certificaterequest/http01.go:93
+[90m------------------------------[0m
 `
 
 var exampleGingkoBlock1 = `• Failure [0.510 seconds]
@@ -371,4 +418,20 @@ test/e2e/framework/framework.go:283
       }
 
   test/e2e/suite/secrettemplate/secrettemplate.go:202
+------------------------------`
+
+var exampleGingkoBlock4 = `• Failure in Spec Setup (BeforeEach) [61.637 seconds]
+[cert-manager] ACME CertificateRequest (HTTP01)
+test/e2e/framework/framework.go:283
+  should automatically recreate challenge pod and still obtain a certificate if it is manually deleted [BeforeEach]
+  test/e2e/suite/issuers/acme/certificaterequest/http01.go:207
+
+  Unexpected error:
+      <*errors.errorString | 0xc000234850>: {
+          s: "timed out waiting for the condition",
+      }
+      timed out waiting for the condition
+  occurred
+
+  test/e2e/suite/issuers/acme/certificaterequest/http01.go:93
 ------------------------------`
