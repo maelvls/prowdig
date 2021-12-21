@@ -22,7 +22,7 @@ go install github.com/maelvls/prowdig@latest
 Run:
 
 ```sh
-$ prowdig max-duration --limit=20
+$ prowdig tests max-duration --limit=20
 ...
 22s     5m8s    [cert-manager] Vault ClusterIssuer CertificateRequest (AppRole) should generate a new certificate valid for the default value (90 days)
 14s     5m0s    [Conformance] Certificates with issuer type CA ClusterIssuer Creating a Gateway with annotations for issuerRef and other Certificate fields
@@ -64,16 +64,16 @@ is:
 Max. duration of "passed".
 ```
 
-prowdig max-duration displays test cases by ascending order of priority
-("priority" meaning that you should take a look at this test case). The last
-test case displayed is the one with the highest difference between the max.
-duration of "passed" and max. duration of "failed". The test cases for which no
-"failed" result are not displayed.
+The command `prowdig tests max-duration` displays test cases by ascending order
+of priority ("priority" meaning that you should take a look at this test case).
+The last test case displayed is the one with the highest difference between the
+max. duration of "passed" and max. duration of "failed". The test cases for
+which no "failed" result are not displayed.
 
-You can list all the Ginkgo results:
+You can list all the Ginkgo results in the last 2 PRs by running:
 
 ```sh
-$ prowdig list
+$ prowdig tests list --limit=2
 17s     [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate valid for 35 days
 19s     [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate valid for 35 days
 7s      [cert-manager] Vault Issuer CertificateRequest (AppRole) should generate a new certificate valid for the default value (90 days)
@@ -96,10 +96,10 @@ $ prowdig list
 19s     [cert-manager] Vault Issuer should fail to init with missing Vault Token
 ```
 
-Note that each test name may appear multiple times in the list, since multiple
-jobs are analyzed.
+Notice how each test name may appear multiple times in the list, since each PR
+has builds.
 
-The color of the duration:
+The color of the duration is:
 
 - Red = failed,
 - Green = passed,
@@ -143,7 +143,7 @@ If you would like to list the Ginkgo failures that happened
 in a given file (can be a URL), you can run:
 
 ```sh
-prowdig parse-logs https://storage.googleapis.com/jetstack-logs/pr-logs/pull/jetstack_cert-manager/4044/pull-cert-manager-e2e-v1-21/1395667201859522561/build-log.txt
+prowdig tests parse-logs https://storage.googleapis.com/jetstack-logs/pr-logs/pull/jetstack_cert-manager/4044/pull-cert-manager-e2e-v1-21/1395667201859522561/build-log.txt
 ```
 
 That will show you an overview of the failures:
@@ -167,7 +167,7 @@ Code: 403. Errors:
 You can pass `-ojson` to get the output in JSON format:
 
 ```sh
-$ prowdig max-duration --limit=1 -ojson | jq
+$ prowdig tests max-duration --limit=1 -ojson | jq
 [
   {
     "name": "[Conformance] Certificates with issuer type VaultAppRole ClusterIssuer should issue a certificate that defines a wildcard DNS Name and its apex DNS Name",
@@ -182,7 +182,7 @@ $ prowdig max-duration --limit=1 -ojson | jq
   the maximum duration of the "passed" and "failed" runs for a given test name.
 
 ```sh
-$ prowdig list --limit=1 -ojson | jq
+$ prowdig tests list --limit=1 -ojson | jq
 [
   {
     "name": "[cert-manager] Vault Issuer should fail to init with missing Vault Token",
@@ -253,3 +253,4 @@ $ prowdig list --limit=1 -ojson | jq
   it is a URL, the line number is appended as `#line=<line_number>`.
 - `err` is the un-indented error message. The line containing `errLoc` is not
   included in `err`.
+

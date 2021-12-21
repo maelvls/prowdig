@@ -94,7 +94,7 @@ type ginkgoResult struct {
 
 var CLI struct {
 	Tests struct {
-		Output    string `output:"Output format." short:"o" default:"text" enum:"text,json"`
+		Output    string `help:"Output format. Can be either 'text' or 'json'." short:"o" default:"text" enum:"text,json"`
 		ParseLogs struct {
 			FileOrURL string `arg:"" help:"Log file or URL to be parsed for Ginkgo blocks."`
 		} `cmd:"" help:"Parse the Ginkgo failure blocks from a given file or URL."`
@@ -110,9 +110,8 @@ var CLI struct {
 	} `cmd:"" help:"Everything related to individual test cases."`
 
 	Builds struct {
-		Output string `output:"Output format." short:"o" default:"text" enum:"text,json"`
-		// Output string   `output:"Output format." short:"o" default:"text" enum:"text,json"`
-		List struct {
+		Output string `help:"Output format. Can be either 'text' or 'json'." short:"o" default:"text" enum:"text,json"`
+		List   struct {
 			Limit int `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
 		} `cmd:"" help:"Lists all the jobs."`
 	} `cmd:"" help:"Everything related to jobs."`
