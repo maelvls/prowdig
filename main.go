@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -209,15 +210,18 @@ func main() {
 				os.Exit(1)
 			}
 		case "text":
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', tabwriter.TabIndent)
+			defer w.Flush()
+
 			for _, res := range results {
 				duration := (time.Duration(res.Duration) * time.Second).String()
 				switch res.Status {
 				case statusPassed:
-					fmt.Printf("✅ %s\t%s\n", green(duration), res.Name)
+					fmt.Fprintf(w, "✅ %s\t%s\n", green(duration), res.Name)
 				case statusFailed:
-					fmt.Printf("❌ %s\t%s: %s\n", red(duration), res.Name, res.Err)
+					fmt.Fprintf(w, "❌ %s\t%s: %s\n", red(duration), res.Name, res.Err)
 				case statusError:
-					fmt.Printf("💣️ %s\t%s: %s\n", blue(duration), res.Name, res.Err)
+					fmt.Fprintf(w, "💣️ %s\t%s: %s\n", blue(duration), res.Name, res.Err)
 				default:
 					panic("developer mistake: unknown status: " + res.Status)
 				}
@@ -254,8 +258,11 @@ func main() {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			}
 		case "text":
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', tabwriter.TabIndent)
+			defer w.Flush()
+
 			for _, stat := range stats {
-				fmt.Printf("%s\t%s\t%s\n",
+				fmt.Fprintf(w, "%s\t%s\t%s\n",
 					green((time.Duration(stat.MaxDurationPassed) * time.Second).String()),
 					red((time.Duration(stat.MaxDurationFailed) * time.Second).String()),
 					stat.Name,
@@ -308,14 +315,17 @@ func main() {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			}
 		case "text":
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', tabwriter.TabIndent)
+			defer w.Flush()
+
 			for _, res := range results {
 				switch res.Status {
 				case statusPassed:
-					fmt.Printf("✅ %s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.Name)
+					fmt.Fprintf(w, "✅ %s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.Name)
 				case statusFailed:
-					fmt.Printf("❌ %s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+					fmt.Fprintf(w, "❌ %s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
 				case statusError:
-					fmt.Printf("💣️ %s\t%s: %s\n", blue((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+					fmt.Fprintf(w, "💣️ %s\t%s: %s\n", blue((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
 				default:
 					panic("developer mistake: unknown status: " + res.Status)
 				}
