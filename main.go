@@ -213,11 +213,11 @@ func main() {
 				duration := (time.Duration(res.Duration) * time.Second).String()
 				switch res.Status {
 				case statusPassed:
-					fmt.Printf("%s\t%s\n", green(duration), res.Name)
+					fmt.Printf("✅ %s\t%s\n", green(duration), res.Name)
 				case statusFailed:
-					fmt.Printf("%s\t%s: %s\n", red(duration), res.Name, res.Err)
+					fmt.Printf("❌ %s\t%s: %s\n", red(duration), res.Name, res.Err)
 				case statusError:
-					fmt.Printf("%s\t%s: %s\n", blue(duration), res.Name, res.Err)
+					fmt.Printf("💣️ %s\t%s: %s\n", blue(duration), res.Name, res.Err)
 				default:
 					panic("developer mistake: unknown status: " + res.Status)
 				}
@@ -311,11 +311,11 @@ func main() {
 			for _, res := range results {
 				switch res.Status {
 				case statusPassed:
-					fmt.Printf("%s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.Name)
+					fmt.Printf("✅ %s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.Name)
 				case statusFailed:
-					fmt.Printf("%s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+					fmt.Printf("❌ %s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
 				case statusError:
-					fmt.Printf("%s\t%s: %s\n", blue((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+					fmt.Printf("💣️ %s\t%s: %s\n", blue((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
 				default:
 					panic("developer mistake: unknown status: " + res.Status)
 				}
