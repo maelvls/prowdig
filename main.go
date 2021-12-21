@@ -47,6 +47,8 @@ var (
 	red   = color.New(color.FgRed).SprintFunc()
 	green = color.New(color.FgGreen).SprintFunc()
 	blue  = color.New(color.FgBlue).SprintFunc()
+
+	theme = pb.Theme{Saucer: "[green]=[reset]", SaucerHead: "[green]>[reset]", SaucerPadding: " ", BarStart: "[", BarEnd: "]"}
 )
 
 type status string
@@ -175,7 +177,7 @@ func main() {
 		// "[]" instead of "null".
 		results := []ginkgoResult{}
 		for _, block := range blocks {
-			parsed, err := parseGinkgoBlock(block, CLI.Tests.ParseLogs.FileOrURL)
+			parsed, err := parseGinkgoBlock(block)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: parsing one of the ginkgo blocks: %v\n", err)
 			}
@@ -233,7 +235,7 @@ func main() {
 
 	case "tests max-duration":
 		if !CLI.NoDownload {
-			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit)
+			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit, isJunitOrBuildLog)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
 				os.Exit(1)
@@ -276,7 +278,7 @@ func main() {
 
 	case "tests list":
 		if !CLI.NoDownload {
-			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit)
+			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit, isJunitOrBuildLog)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
 				os.Exit(1)
@@ -338,7 +340,7 @@ func main() {
 
 	case "builds list":
 		if !CLI.NoDownload {
-			err := downloadBuildArtifactsToCache(bucketName, CLI.Builds.List.Limit)
+			err := downloadBuildArtifactsToCache(bucketName, CLI.Builds.List.Limit, regexp.MustCompile(`prowjob\.json$`))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download build artifacts: %v\n", err)
 				os.Exit(1)
@@ -466,7 +468,7 @@ type parsedGinkgoBlock struct {
 //
 // Note that the "[It]" suffixes are removed from the test names in order to
 // match the test name given in junit__0x.xml files.
-func parseGinkgoBlock(block ginkgoBlock, fileOrURL string) (parsedGinkgoBlock, error) {
+func parseGinkgoBlock(block ginkgoBlock) (parsedGinkgoBlock, error) {
 	if len(block.lines) < 2 {
 		return parsedGinkgoBlock{}, fmt.Errorf("a ginkgo block is at least 2 lines long, got: %s", strings.Join(block.lines, "\n"))
 	}
@@ -609,80 +611,108 @@ func parseGinkgoBlock(block ginkgoBlock, fileOrURL string) (parsedGinkgoBlock, e
 //   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/prowjob.json
 //   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/started.json
 //   pr-logs/pull/jetstack_cert-manager/2/pull-cert-manager-e2e-v1-13/245/build-log.txt...
-func downloadBuildArtifactsToCache(bucketName string, numberPastPRs int) error {
+//
+// The filter can be left nil.
+func downloadBuildArtifactsToCache(bucketName string, maxBuilds int, filter *regexp.Regexp) error {
 	gcs, err := storage.NewClient(context.Background())
 	if err != nil {
 		return fmt.Errorf("error: Google Cloud storage: %v\n", err)
 	}
 	bucket := gcs.Bucket(bucketName)
 
-	bar := pb.NewOptions(int(5 /* seconds */ *5 /* =1/200ms */),
+	bar1 := pb.NewOptions(int(5 /* seconds */ *5 /* = 1/200 ms */),
 		pb.OptionSetPredictTime(false),
 		pb.OptionSetWriter(os.Stderr),
 		pb.OptionEnableColorCodes(true),
 		pb.OptionShowBytes(false),
 		pb.OptionSetDescription("Listing all PRs..."),
-		pb.OptionSetTheme(pb.Theme{
-			Saucer:        "[green]=[reset]",
-			SaucerHead:    "[green]>[reset]",
-			SaucerPadding: " ",
-			BarStart:      "[",
-			BarEnd:        "]",
-		}),
+		pb.OptionSetTheme(theme),
 	)
-	_ = bar.RenderBlank()
 	go func() {
-		for !bar.IsFinished() {
+		for !bar1.IsFinished() {
+			_ = bar1.Add(1)
+			_ = bar1.RenderBlank()
 			time.Sleep(200 * time.Millisecond)
-			_ = bar.Add(1)
-			_ = bar.RenderBlank()
 		}
 	}()
 	prPrefixes, err := listPRPrefixes(bucket, bucketPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to list PR prefixes: %v", err)
 	}
-	_ = bar.Clear()
-	_ = bar.Finish()
+	_ = bar1.Finish()
+	_ = bar1.Clear()
 
-	// There may be a lot of PRs; for example, we 20 PRs selected, prowdig will
-	// download around 600MB of build-log.txt.
-	if len(prPrefixes) > numberPastPRs {
-		prPrefixes = prPrefixes[len(prPrefixes)-numberPastPRs:]
+	// Now, let's list the files under each PR prefix.
+	var objects []storage.ObjectAttrs
+	totalSize := int64(0)
+
+	bar2 := pb.NewOptions(maxBuilds,
+		pb.OptionSetWriter(os.Stderr),
+		pb.OptionSetPredictTime(false),
+		pb.OptionEnableColorCodes(true),
+		pb.OptionShowBytes(false),
+		pb.OptionSetDescription("Listing jobs for each PR prefix..."),
+		pb.OptionSetTheme(theme),
+	)
+	_ = bar2.RenderBlank()
+	countBuilds := 0 // One prowjob.json = one build.
+	for _, prPrefix := range prPrefixes {
+		objectIter := bucket.Objects(context.Background(), &storage.Query{
+			Prefix: prPrefix, Projection: storage.ProjectionNoACL,
+		})
+
+		for countBuilds < maxBuilds {
+			object, err := objectIter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("failed to iterate over GCS objects: %s: %w", object.Name, err)
+			}
+
+			if strings.HasSuffix(object.Name, "prowjob.json") {
+				countBuilds++
+			}
+
+			if filter != nil && !filter.MatchString(object.Name) {
+				continue
+			}
+
+			totalSize += object.Size
+
+			// Why "*object"? No one else is going to touch the
+			// *storage.ObjectAttrs pointer, so it makes sense to do a shallow
+			// copy here since all the "shared" fields like object.Metadata
+			// won't be used by anyone else.
+			objects = append(objects, *object)
+		}
+		_ = bar2.Add(1)
+		if countBuilds == maxBuilds {
+			break
+		}
 	}
+	_ = bar2.Finish()
+	_ = bar2.Clear()
 
-	// For each PR prefix such as pr-logs/pull/jetstack_cert-manager/4664/,
-	// we fetch all the junit files and build-log.txt files.
-	objects, totalSize, err := listObjectsUnderPrefixes(bucket, prPrefixes)
-	if err != nil {
-		return fmt.Errorf("failed to list objects under prefixes: %v", err)
-	}
-
-	bar = pb.NewOptions64(totalSize,
+	bar3 := pb.NewOptions64(totalSize,
 		pb.OptionSetWriter(os.Stderr),
 		pb.OptionSetPredictTime(true),
 		pb.OptionShowCount(),
 		pb.OptionEnableColorCodes(true),
 		pb.OptionShowBytes(true),
 		pb.OptionSetDescription("Downloading logs for each job..."),
-		pb.OptionSetTheme(pb.Theme{
-			Saucer:        "[green]=[reset]",
-			SaucerHead:    "[green]>[reset]",
-			SaucerPadding: " ",
-			BarStart:      "[",
-			BarEnd:        "]",
-		}),
+		pb.OptionSetTheme(theme),
 	)
-	_ = bar.RenderBlank()
+	_ = bar3.RenderBlank()
 	for _, object := range objects {
 		err := downloadToCache(&object, bucket)
 		if err != nil {
 			return fmt.Errorf("failed to download jobs artifacts for %s: %w", object.Name, err)
 		}
-		_ = bar.Add64(object.Size)
+		_ = bar3.Add64(object.Size)
 	}
-	_ = bar.Clear()
-	_ = bar.Finish()
+	_ = bar3.Finish()
+	_ = bar3.Clear()
 
 	return nil
 }
@@ -746,7 +776,7 @@ func parseGinkgoResultsFromCache(bucketName string, bucketPrefix string, numberP
 			}
 
 			for _, block := range blocks {
-				parsed, err := parseGinkgoBlock(block, url)
+				parsed, err := parseGinkgoBlock(block)
 				if err != nil {
 					return nil, fmt.Errorf("failed to parse ginkgo block at line %d in %s: %w", block.line, url, err)
 				}
@@ -953,7 +983,7 @@ func findCachedArtifacts(bucketPrefix string, numberPastPRs int) ([]string, erro
 		prDirs = append(prDirs, cacheDir+"/"+bucketPrefix+"/"+dirEntry.Name())
 	}
 
-	prDirs, err = numericalSortPRs(prDirs)
+	prDirs, err = sortNumericDesc(prDirs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sort PR prefixes: %w", err)
 	}
@@ -1064,7 +1094,7 @@ func computeStatsMaxDuration(results []ginkgoResult) []StatsMaxDuration {
 //   pr-logs/pull/jetstack_cert-manager/1017/pull-cert-manager-e2e-v1-13/231/artifacts/junit__02.xml
 //   pr-logs/pull/jetstack_cert-manager/1017/pull-cert-manager-e2e-v1-13/231/artifacts/junit__10.xml
 //   <----------- prPrefix ----------------->
-func listObjectsUnderPrefixes(bucket *storage.BucketHandle, prPrefixes []string) ([]storage.ObjectAttrs, int64, error) {
+func listObjectsUnderPrefixes(bucket *storage.BucketHandle, prPrefixes []string, builds int) ([]storage.ObjectAttrs, int64, error) {
 	var objects []storage.ObjectAttrs
 	totalSize := int64(0)
 
@@ -1149,20 +1179,21 @@ func parseJunit(bytes []byte) ([]parsedGinkgoBlock, error) {
 	return results, nil
 }
 
-// Returns the numerically ordered pull request prefixes. Prefixes that do not
-// end with a number are skipped. The prefix string corresponds to the string
-// that you would give to gsutil in order to list all the PRs; the ending "/" is
-// optional:
+// Returns the numerically ordered pull request prefixes in decreasing order.
+// Prefixes that do not end with a number are skipped. The prefix string
+// corresponds to the string that you would give to gsutil in order to list all
+// the PRs; the ending "/" is optional:
 //
 //  gsutil ls gs://jetstack-logs/pr-logs/pull/jetstack_cert-manager
 //                 <--bucket---> <----------- prefix ------------->
 //
-// The returned strings are numerically ordered and look like this:
+// The returned strings are ordered numerically by descreasing order and look
+// like this:
 //
-//  pr-logs/pull/jetstack_cert-manager/1/
-//  pr-logs/pull/jetstack_cert-manager/2/
-//  pr-logs/pull/jetstack_cert-manager/10/
 //  pr-logs/pull/jetstack_cert-manager/20/
+//  pr-logs/pull/jetstack_cert-manager/10/
+//  pr-logs/pull/jetstack_cert-manager/2/
+//  pr-logs/pull/jetstack_cert-manager/1/
 //  <----------- prefix ------------->
 func listPRPrefixes(bucket *storage.BucketHandle, prefix string) ([]string, error) {
 	if !strings.HasSuffix(prefix, "/") {
@@ -1190,7 +1221,7 @@ func listPRPrefixes(bucket *storage.BucketHandle, prefix string) ([]string, erro
 		prPrefixes = append(prPrefixes, pr.Prefix)
 	}
 
-	prPrefixes, err := numericalSortPRs(prPrefixes)
+	prPrefixes, err := sortNumericDesc(prPrefixes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sort PR prefixes: %w", err)
 	}
@@ -1198,21 +1229,23 @@ func listPRPrefixes(bucket *storage.BucketHandle, prefix string) ([]string, erro
 	return prPrefixes, nil
 }
 
-func numericalSortPRs(prPrefixes []string) ([]string, error) {
+// Sorts using the numerical order by descreasing PR number. Ignores the ending
+// "/" if there is one.
+func sortNumericDesc(prPrefixes []string) ([]string, error) {
 	// Sorting with strings.Compare would yield a lexicographical order of the
-	// prPrefixes, it would look like this::
+	// prPrefixes, it would look like this:
 	//
-	//  pr-logs/pull/jetstack_cert-manager/1/
-	//  pr-logs/pull/jetstack_cert-manager/10/
+	//  pr-logs/pull/jetstack_cert-manager/20/
 	//  pr-logs/pull/jetstack_cert-manager/2/    <-- wrong
-	//  pr-logs/pull/jetstack_cert-manager/20/
-	//
-	// Instead, we want a numerical ordering:
-	//
-	//  pr-logs/pull/jetstack_cert-manager/1/
-	//  pr-logs/pull/jetstack_cert-manager/2/    <-- right
 	//  pr-logs/pull/jetstack_cert-manager/10/
+	//  pr-logs/pull/jetstack_cert-manager/1/
+	//
+	// Instead, we want a numerical ordering in descreasing order:
+	//
 	//  pr-logs/pull/jetstack_cert-manager/20/
+	//  pr-logs/pull/jetstack_cert-manager/10/
+	//  pr-logs/pull/jetstack_cert-manager/2/    <-- right
+	//  pr-logs/pull/jetstack_cert-manager/1/
 	sort.Slice(prPrefixes, func(i, j int) bool {
 		matches := endsWithPRNumber.FindStringSubmatch(prPrefixes[i])
 		if len(matches) != 2 {
@@ -1234,7 +1267,7 @@ func numericalSortPRs(prPrefixes []string) ([]string, error) {
 			panic("developer mistake: " + err.Error())
 		}
 
-		return int1 < int2
+		return int1 >= int2
 	})
 
 	return prPrefixes, nil
