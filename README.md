@@ -59,9 +59,9 @@ is:
 ^        ^      ^
 |        |      The test name.
 |        |
-|        Max. duration of "passed".
+|        Max. duration of "failed".
 |
-Max. duration of "failed".
+Max. duration of "passed".
 ```
 
 prowdig max-duration displays test cases by ascending order of priority
