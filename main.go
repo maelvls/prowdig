@@ -100,7 +100,8 @@ var CLI struct {
 		} `cmd:"" help:"Parse the Ginkgo failure blocks from a given file or URL."`
 
 		List struct {
-			Limit int `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+			Limit  int    `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+			Filter string `help:"Only list tests for which the name contains the given string."`
 		} `cmd:"" help:"Lists all the test results ordered by name. The logs are fetched from the bucket."`
 
 		MaxDuration struct {
@@ -261,6 +262,17 @@ func main() {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
 			os.Exit(1)
+		}
+
+		// Filter using the glob pattern.
+		if CLI.Tests.List.Filter != "" {
+			var filtered []ginkgoResult
+			for _, res := range results {
+				if strings.Contains(res.Name, CLI.Tests.List.Filter) {
+					filtered = append(filtered, res)
+				}
+			}
+			results = filtered
 		}
 
 		sort.Slice(results, func(i, j int) bool {
