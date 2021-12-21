@@ -109,7 +109,8 @@ var CLI struct {
 		} `cmd:"" help:"Lists the maximum 'passed' duration vs. maximum 'failed' duration of each test order by name. The logs are fetched from the bucket."`
 	} `cmd:"" help:"Everything related to individual test cases."`
 
-	Jobs struct {
+	Builds struct {
+		Output string `output:"Output format." short:"o" default:"text" enum:"text,json"`
 		// Output string   `output:"Output format." short:"o" default:"text" enum:"text,json"`
 		List struct {
 			Limit int `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
@@ -210,7 +211,7 @@ func main() {
 
 	case "tests max-duration":
 		if !CLI.NoDownload {
-			err := downloadJobArtifactsToCache(bucketName, CLI.Tests.List.Limit)
+			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
 				os.Exit(1)
@@ -250,7 +251,7 @@ func main() {
 
 	case "tests list":
 		if !CLI.NoDownload {
-			err := downloadJobArtifactsToCache(bucketName, CLI.Tests.List.Limit)
+			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
 				os.Exit(1)
@@ -296,39 +297,41 @@ func main() {
 			os.Exit(1)
 		}
 
-	case "jobs list":
+	case "builds list":
 		if !CLI.NoDownload {
-			err := downloadJobArtifactsToCache(bucketName, CLI.Tests.List.Limit)
+			err := downloadBuildArtifactsToCache(bucketName, CLI.Builds.List.Limit)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
+				fmt.Fprintf(os.Stderr, "failed to download build artifacts: %v\n", err)
 				os.Exit(1)
 			}
 		}
 
-		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefix, CLI.Tests.List.Limit)
+		results, err := parseBuildsFromCache(bucketPrefix, CLI.Builds.List.Limit)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
+			fmt.Fprintf(os.Stderr, "failed to fetch build results from files: %v\n", err)
 			os.Exit(1)
 		}
 
-		stats := computeStatsMaxDuration(results)
-		switch CLI.Tests.Output {
+		switch CLI.Builds.Output {
 		case "json":
-			if stats == nil {
+			if results == nil {
 				// Force the encoded JSON to show "[]" instead of "null".
-				stats = []StatsMaxDuration{}
+				results = []BuildResult{}
 			}
-			err = json.NewEncoder(os.Stdout).Encode(stats)
+			err = json.NewEncoder(os.Stdout).Encode(results)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			}
 		case "text":
-			for _, stat := range stats {
-				fmt.Printf("%s\t%s\t%s\n",
-					green((time.Duration(stat.MaxDurationPassed) * time.Second).String()),
-					red((time.Duration(stat.MaxDurationFailed) * time.Second).String()),
-					stat.Name,
-				)
+			for _, res := range results {
+				switch res.Status {
+				case BuildSuccess:
+					fmt.Printf("%s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.JobName)
+				case BuildFailed:
+					fmt.Printf("%s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.JobName, res.Err)
+				default:
+					panic("developer mistake: unknown status: " + res.Status)
+				}
 			}
 		}
 		if err != nil {
@@ -567,7 +570,7 @@ func parseGinkgoBlock(block ginkgoBlock, fileOrURL string) (parsedGinkgoBlock, e
 //   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/prowjob.json
 //   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/started.json
 //   pr-logs/pull/jetstack_cert-manager/2/pull-cert-manager-e2e-v1-13/245/build-log.txt...
-func downloadJobArtifactsToCache(bucketName string, numberPastPRs int) error {
+func downloadBuildArtifactsToCache(bucketName string, numberPastPRs int) error {
 	gcs, err := storage.NewClient(context.Background())
 	if err != nil {
 		return fmt.Errorf("error: Google Cloud storage: %v\n", err)
@@ -726,6 +729,175 @@ func parseGinkgoResultsFromCache(bucketName string, bucketPrefix string, numberP
 		}
 	}
 	return ginkgoResults, nil
+}
+
+type BuildStatus string
+
+const (
+	BuildSuccess BuildStatus = "success"
+	BuildFailed  BuildStatus = "failure"
+)
+
+type BuildResult struct {
+	// Can be "success" or "failure". We don't care about "pending" states.
+	Status BuildStatus `json:"status"`
+
+	// The duration in seconds of this build.
+	Duration int `json:"duration"`
+
+	// URL to the Prow UI for this build.
+	URL string `json:"url"`
+
+	// Name of the job, e.g. "pull-cert-manager-e2e-v1-13"
+	JobName string `json:"jobName"`
+
+	// (optional) Show the error message if the build is "failure".
+	Err string `json:"err"`
+}
+
+// The "bucket" string in input is used for displaying and logging. It is not
+// used to fetch anything from GCS.
+func parseBuildsFromCache(bucketPrefix string, numberPastPRs int) ([]BuildResult, error) {
+	// Let's only select the last few PRs.
+	artifacts, err := findCachedArtifacts(bucketPrefix, numberPastPRs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find cached artifacts: %v", err)
+	}
+
+	var results []BuildResult
+	for _, artifact := range artifacts {
+		if !strings.HasSuffix(artifact, "prowjob.json") {
+			continue
+		}
+
+		bytes, err := loadFromCache(artifact)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load from file %s, was expected to be already in cache: %w", artifact, err)
+		}
+
+		type prowJobV1 struct {
+			Spec struct {
+				Type      string `json:"type"`
+				Agent     string `json:"agent"`
+				Cluster   string `json:"cluster"`
+				Namespace string `json:"namespace"`
+				Job       string `json:"job"`
+				Refs      struct {
+					Org      string `json:"org"`
+					Repo     string `json:"repo"`
+					RepoLink string `json:"repo_link"`
+					BaseRef  string `json:"base_ref"`
+					BaseSha  string `json:"base_sha"`
+					BaseLink string `json:"base_link"`
+					Pulls    []struct {
+						Number     int    `json:"number"`
+						Author     string `json:"author"`
+						Sha        string `json:"sha"`
+						Title      string `json:"title"`
+						Link       string `json:"link"`
+						CommitLink string `json:"commit_link"`
+						AuthorLink string `json:"author_link"`
+					} `json:"pulls"`
+				} `json:"refs"`
+				Report         bool   `json:"report"`
+				Context        string `json:"context"`
+				RerunCommand   string `json:"rerun_command"`
+				MaxConcurrency int    `json:"max_concurrency"`
+				PodSpec        struct {
+					Volumes []struct {
+						Name     string `json:"name"`
+						HostPath struct {
+							Path string `json:"path"`
+							Type string `json:"type"`
+						} `json:"hostPath,omitempty"`
+						Secret struct {
+							SecretName string `json:"secretName"`
+						} `json:"secret,omitempty"`
+						EmptyDir struct {
+						} `json:"emptyDir,omitempty"`
+					} `json:"volumes"`
+					Containers []struct {
+						Name  string   `json:"name"`
+						Image string   `json:"image"`
+						Args  []string `json:"args"`
+						Env   []struct {
+							Name  string `json:"name"`
+							Value string `json:"value"`
+						} `json:"env"`
+						Resources struct {
+							Requests struct {
+								CPU    string `json:"cpu"`
+								Memory string `json:"memory"`
+							} `json:"requests"`
+						} `json:"resources"`
+						VolumeMounts []struct {
+							Name      string `json:"name"`
+							ReadOnly  bool   `json:"readOnly,omitempty"`
+							MountPath string `json:"mountPath"`
+						} `json:"volumeMounts"`
+						SecurityContext struct {
+							Capabilities struct {
+								Add []string `json:"add"`
+							} `json:"capabilities"`
+							Privileged bool `json:"privileged"`
+						} `json:"securityContext"`
+					} `json:"containers"`
+					DNSConfig struct {
+						Options []struct {
+							Name  string `json:"name"`
+							Value string `json:"value"`
+						} `json:"options"`
+					} `json:"dnsConfig"`
+				} `json:"pod_spec"`
+			} `json:"spec"`
+			Status struct {
+				StartTime      time.Time `json:"startTime"`
+				PendingTime    time.Time `json:"pendingTime"`
+				CompletionTime time.Time `json:"completionTime"`
+				State          string    `json:"state"`
+				Description    string    `json:"description"`
+				URL            string    `json:"url"`
+				PodName        string    `json:"pod_name"`
+				BuildID        string    `json:"build_id"`
+			} `json:"status"`
+		}
+
+		prowjob := prowJobV1{}
+		err = json.Unmarshal(bytes, &prowjob)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse prowjob.json file %s: %w", artifact, err)
+		}
+
+		duration := int(math.Floor(prowjob.Status.CompletionTime.Sub(prowjob.Status.StartTime).Seconds()))
+		var status BuildStatus
+		switch prowjob.Status.State {
+		case "success":
+			status = BuildSuccess
+		case "failure":
+			status = BuildFailed
+		case "pending", "aborted":
+			// We don't care about pending builds. Aborted builds are not
+			// interesting either since their duration won't make sense.
+			continue
+		default:
+			return nil, fmt.Errorf("developer mistake: unknown state %s", prowjob.Status.State)
+		}
+
+		errStr := ""
+		if prowjob.Status.State != "success" {
+			errStr = prowjob.Status.Description
+		}
+
+		results = append(results, BuildResult{
+			JobName:  prowjob.Spec.Job,
+			Status:   status,
+			Duration: duration,
+			URL:      prowjob.Status.URL,
+			Err:      errStr,
+		})
+	}
+
+	return results, nil
 }
 
 func findCachedArtifacts(bucketPrefix string, numberPastPRs int) ([]string, error) {
