@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"io/ioutil"
 	"math"
 	"net/http"
@@ -119,7 +120,7 @@ var CLI struct {
 		} `cmd:"" help:"Lists the maximum 'passed' duration vs. maximum 'failed' duration of each test order by name. The logs are fetched from the bucket."`
 	} `cmd:"" help:"Everything related to individual test cases."`
 
-	Builds struct {
+	Jobs struct {
 		Output string `help:"Output format. Can be either 'text' or 'json'." short:"o" default:"text" enum:"text,json"`
 		List   struct {
 			Limit int `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
@@ -338,22 +339,22 @@ func main() {
 			os.Exit(1)
 		}
 
-	case "builds list":
+	case "jobs list":
 		if !CLI.NoDownload {
-			err := downloadBuildArtifactsToCache(bucketName, CLI.Builds.List.Limit, regexp.MustCompile(`prowjob\.json$`))
+			err := downloadBuildArtifactsToCache(bucketName, CLI.Jobs.List.Limit, regexp.MustCompile(`prowjob\.json$`))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download build artifacts: %v\n", err)
 				os.Exit(1)
 			}
 		}
 
-		results, err := parseBuildsFromCache(bucketPrefix, CLI.Builds.List.Limit)
+		results, err := parseBuildsFromCache(bucketPrefix, CLI.Jobs.List.Limit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to fetch build results from files: %v\n", err)
 			os.Exit(1)
 		}
 
-		switch CLI.Builds.Output {
+		switch CLI.Jobs.Output {
 		case "json":
 			if results == nil {
 				// Force the encoded JSON to show "[]" instead of "null".
@@ -613,7 +614,7 @@ func parseGinkgoBlock(block ginkgoBlock) (parsedGinkgoBlock, error) {
 //   pr-logs/pull/jetstack_cert-manager/2/pull-cert-manager-e2e-v1-13/245/build-log.txt...
 //
 // The filter can be left nil.
-func downloadBuildArtifactsToCache(bucketName string, maxBuilds int, filter *regexp.Regexp) error {
+func downloadBuildArtifactsToCache(bucketName string, maxJobs int, filter *regexp.Regexp) error {
 	gcs, err := storage.NewClient(context.Background())
 	if err != nil {
 		return fmt.Errorf("error: Google Cloud storage: %v\n", err)
@@ -646,22 +647,22 @@ func downloadBuildArtifactsToCache(bucketName string, maxBuilds int, filter *reg
 	var objects []storage.ObjectAttrs
 	totalSize := int64(0)
 
-	bar2 := pb.NewOptions(maxBuilds,
+	bar2 := pb.NewOptions(maxJobs,
 		pb.OptionSetWriter(os.Stderr),
 		pb.OptionSetPredictTime(false),
 		pb.OptionEnableColorCodes(true),
 		pb.OptionShowBytes(false),
-		pb.OptionSetDescription("Listing jobs for each PR prefix..."),
+		pb.OptionSetDescription(fmt.Sprintf("Finding the last %d jobs...", maxJobs)),
 		pb.OptionSetTheme(theme),
 	)
 	_ = bar2.RenderBlank()
-	countBuilds := 0 // One prowjob.json = one build.
+	countJobs := 0 // One prowjob.json = one build.
 	for _, prPrefix := range prPrefixes {
 		objectIter := bucket.Objects(context.Background(), &storage.Query{
 			Prefix: prPrefix, Projection: storage.ProjectionNoACL,
 		})
 
-		for countBuilds < maxBuilds {
+		for countJobs < maxJobs {
 			object, err := objectIter.Next()
 			if err == iterator.Done {
 				break
@@ -671,7 +672,8 @@ func downloadBuildArtifactsToCache(bucketName string, maxBuilds int, filter *reg
 			}
 
 			if strings.HasSuffix(object.Name, "prowjob.json") {
-				countBuilds++
+				countJobs++
+				_ = bar2.Add(1)
 			}
 
 			if filter != nil && !filter.MatchString(object.Name) {
@@ -685,9 +687,9 @@ func downloadBuildArtifactsToCache(bucketName string, maxBuilds int, filter *reg
 			// copy here since all the "shared" fields like object.Metadata
 			// won't be used by anyone else.
 			objects = append(objects, *object)
+
 		}
-		_ = bar2.Add(1)
-		if countBuilds == maxBuilds {
+		if countJobs >= maxJobs {
 			break
 		}
 	}
@@ -719,9 +721,9 @@ func downloadBuildArtifactsToCache(bucketName string, maxBuilds int, filter *reg
 
 // The "bucket" string in input is used for displaying and logging. It is not
 // used to fetch anything from GCS.
-func parseGinkgoResultsFromCache(bucketName string, bucketPrefix string, numberPastPRs int) ([]ginkgoResult, error) {
+func parseGinkgoResultsFromCache(bucketName string, bucketPrefix string, maxJobs int) ([]ginkgoResult, error) {
 	// Let's only select the last few PRs.
-	artifacts, err := findCachedArtifacts(bucketPrefix, numberPastPRs)
+	artifacts, err := findCachedArtifacts(bucketPrefix, maxJobs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find cached artifacts: %v", err)
 	}
@@ -826,9 +828,9 @@ type BuildResult struct {
 
 // The "bucket" string in input is used for displaying and logging. It is not
 // used to fetch anything from GCS.
-func parseBuildsFromCache(bucketPrefix string, numberPastPRs int) ([]BuildResult, error) {
+func parseBuildsFromCache(bucketPrefix string, maxJobs int) ([]BuildResult, error) {
 	// Let's only select the last few PRs.
-	artifacts, err := findCachedArtifacts(bucketPrefix, numberPastPRs)
+	artifacts, err := findCachedArtifacts(bucketPrefix, maxJobs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find cached artifacts: %v", err)
 	}
@@ -969,7 +971,7 @@ func parseBuildsFromCache(bucketPrefix string, numberPastPRs int) ([]BuildResult
 	return results, nil
 }
 
-func findCachedArtifacts(bucketPrefix string, numberPastPRs int) ([]string, error) {
+func findCachedArtifacts(bucketPrefix string, maxJobs int) ([]string, error) {
 	prDirEntries, err := os.ReadDir(cacheDir + "/" + bucketPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read current directory: %v", err)
@@ -988,21 +990,31 @@ func findCachedArtifacts(bucketPrefix string, numberPastPRs int) ([]string, erro
 		return nil, fmt.Errorf("failed to sort PR prefixes: %w", err)
 	}
 
-	if len(prDirs) > numberPastPRs {
-		prDirs = prDirs[len(prDirs)-numberPastPRs:]
-	}
-
+	countJobs := 0
 	var artifacts []string
 	for _, prDir := range prDirs {
 		err := filepath.Walk(prDir, func(path string, _ os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
+
+			if strings.HasSuffix(path, "prowjob.json") {
+				countJobs++
+			}
+
 			artifacts = append(artifacts, path)
+
+			if countJobs >= maxJobs {
+				return io.EOF
+			}
+
 			return nil
 		})
-		if err != nil {
+		if err != nil && err != io.EOF {
 			return nil, fmt.Errorf("failed to recurse into %s: %w", prDir, err)
+		}
+		if countJobs >= maxJobs {
+			break
 		}
 	}
 	return artifacts, nil
@@ -1068,81 +1080,6 @@ func computeStatsMaxDuration(results []ginkgoResult) []StatsMaxDuration {
 		})
 	}
 	return stats
-}
-
-// Returns the objects (just their attributes) that match the given regex across
-// all the prefixes given in input, as well as the total size in bytes.
-//
-// A progress bar is shown since there are many calls made to GCS and it takes a
-// few seconds.
-//
-// For example, with:
-//
-//  listObjectsUnderPrefixes(bucket, []string{
-//    "pr-logs/pull/jetstack_cert-manager/1016/",
-//    "pr-logs/pull/jetstack_cert-manager/1017/",
-//  }, regexp.MustCompile(`(build-log\.txt|junit__.*\.xml)$`))
-//
-// the returned object.Name will be:
-//
-//   pr-logs/pull/jetstack_cert-manager/1016/pull-cert-manager-e2e-v1-13/231/build-log.txt
-//   pr-logs/pull/jetstack_cert-manager/1016/pull-cert-manager-e2e-v1-13/231/artifacts/junit__01.xml
-//   pr-logs/pull/jetstack_cert-manager/1016/pull-cert-manager-e2e-v1-13/231/artifacts/junit__02.xml
-//   pr-logs/pull/jetstack_cert-manager/1016/pull-cert-manager-e2e-v1-13/231/artifacts/junit__10.xml
-//   pr-logs/pull/jetstack_cert-manager/1017/pull-cert-manager-e2e-v1-13/231/build-log.txt
-//   pr-logs/pull/jetstack_cert-manager/1017/pull-cert-manager-e2e-v1-13/231/artifacts/junit__01.xml
-//   pr-logs/pull/jetstack_cert-manager/1017/pull-cert-manager-e2e-v1-13/231/artifacts/junit__02.xml
-//   pr-logs/pull/jetstack_cert-manager/1017/pull-cert-manager-e2e-v1-13/231/artifacts/junit__10.xml
-//   <----------- prPrefix ----------------->
-func listObjectsUnderPrefixes(bucket *storage.BucketHandle, prPrefixes []string, builds int) ([]storage.ObjectAttrs, int64, error) {
-	var objects []storage.ObjectAttrs
-	totalSize := int64(0)
-
-	bar := pb.NewOptions(len(prPrefixes),
-		pb.OptionSetWriter(os.Stderr),
-		pb.OptionSetPredictTime(false),
-		pb.OptionEnableColorCodes(true),
-		pb.OptionShowBytes(false),
-		pb.OptionSetDescription("Listing jobs for each PR prefix..."),
-		pb.OptionSetTheme(pb.Theme{
-			Saucer:        "[green]=[reset]",
-			SaucerHead:    "[green]>[reset]",
-			SaucerPadding: " ",
-			BarStart:      "[",
-			BarEnd:        "]",
-		}),
-	)
-	_ = bar.RenderBlank()
-	defer func() {
-		_ = bar.Clear()
-		_ = bar.Finish()
-	}()
-
-	for _, prPrefix := range prPrefixes {
-		objectIter := bucket.Objects(context.Background(), &storage.Query{
-			Prefix: prPrefix, Projection: storage.ProjectionNoACL,
-		})
-
-		for {
-			object, err := objectIter.Next()
-			if err == iterator.Done {
-				break
-			}
-			if err != nil {
-				return nil, 0, fmt.Errorf("failed to iterate over GCS objects: %s: %w", object.Name, err)
-			}
-
-			totalSize += object.Size
-
-			// Why "*object"? No one else is going to touch the
-			// *storage.ObjectAttrs pointer, so it makes sense to do a shallow
-			// copy here since all the "shared" fields like object.Metadata
-			// won't be used by anyone else.
-			objects = append(objects, *object)
-		}
-		_ = bar.Add(1)
-	}
-	return objects, totalSize, nil
 }
 
 // The "skipped", "failed", and "error" tests are not taken into account. Only
