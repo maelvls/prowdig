@@ -144,6 +144,10 @@ func main() {
 					fmt.Printf("%s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.Name)
 				case statusFailed:
 					fmt.Printf("%s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+				case statusError:
+					fmt.Printf("%s\t%s: %s\n", blue((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+				default:
+					panic("developer mistake: unknown status: " + res.Status)
 				}
 			}
 		default:
@@ -225,6 +229,10 @@ func main() {
 					fmt.Printf("%s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.Name)
 				case statusFailed:
 					fmt.Printf("%s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+				case statusError:
+					fmt.Printf("%s\t%s: %s\n", blue((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+				default:
+					panic("developer mistake: unknown status: " + res.Status)
 				}
 			}
 		}
@@ -234,7 +242,7 @@ func main() {
 		}
 
 	default:
-		panic(kongctx.Command())
+		panic("developer mistake: " + kongctx.Command())
 	}
 }
 
@@ -877,4 +885,7 @@ func green(s string) string {
 }
 func red(s string) string {
 	return fmt.Sprintf("\x1b[31m%s\x1b[0m", s)
+}
+func blue(s string) string {
+	return fmt.Sprintf("\x1b[34m%s\x1b[0m", s)
 }
