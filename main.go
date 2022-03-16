@@ -48,6 +48,7 @@ var (
 	red   = color.New(color.FgRed).SprintFunc()
 	green = color.New(color.FgGreen).SprintFunc()
 	blue  = color.New(color.FgBlue).SprintFunc()
+	gray  = color.New(color.FgHiBlack).SprintFunc()
 
 	theme = pb.Theme{Saucer: "[green]=[reset]", SaucerHead: "[green]>[reset]", SaucerPadding: " ", BarStart: "[", BarEnd: "]"}
 )
@@ -119,6 +120,11 @@ var CLI struct {
 			Limit      int  `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
 			NoDownload bool `help:"Only use the local cache, do not download anything from the GCS bucket."`
 		} `cmd:"" help:"Lists the maximum 'passed' duration vs. maximum 'failed' duration of each test order by name. The logs are fetched from the bucket."`
+
+		MostFailures struct {
+			Limit      int  `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+			NoDownload bool `help:"Only use the local cache, do not download anything from the GCS bucket."`
+		} `cmd:"" help:"Lists the test names that fail the most. Two numbers are shown: the count of passed and the count of failed tests. The last error message is shown right after the test name. The list is sorted in descending order by the count of failed tests."`
 	} `cmd:"" help:"Everything related to individual test cases."`
 
 	Jobs struct {
@@ -270,6 +276,54 @@ func main() {
 					green((time.Duration(stat.MaxDurationPassed) * time.Second).String()),
 					red((time.Duration(stat.MaxDurationFailed) * time.Second).String()),
 					stat.Name,
+				)
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "tests most-failures":
+		if !CLI.NoDownload {
+			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.MostFailures.Limit, isToBeDownloaded)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefixes, CLI.Tests.MostFailures.Limit)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
+			os.Exit(1)
+		}
+
+		stats := computeStatsMostFailures(results)
+		switch CLI.Tests.Output {
+		case "json":
+			if stats == nil {
+				// Force the encoded JSON to show "[]" instead of "null".
+				stats = []StatsMostFailures{}
+			}
+			err = json.NewEncoder(os.Stdout).Encode(stats)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			}
+		case "text":
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', tabwriter.TabIndent)
+			defer w.Flush()
+
+			for _, stat := range stats {
+				lastErr := ""
+				if len(stat.Errors) > 0 {
+					lastErr = stat.Errors[len(stat.Errors)-1]
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s: %s\n",
+					green(stat.CountPassed),
+					red(stat.CountFailed),
+					stat.Name,
+					gray(lastErr),
 				)
 			}
 		}
@@ -1097,6 +1151,65 @@ func computeStatsMaxDuration(results []ginkgoResult) []StatsMaxDuration {
 			Name:              name,
 			MaxDurationPassed: maxMap[name].success,
 			MaxDurationFailed: maxMap[name].failed,
+		})
+	}
+	return stats
+}
+
+type StatsMostFailures struct {
+	Name        string   `json:"name"`
+	CountPassed int      `json:"countPassed"`
+	CountFailed int      `json:"countFailed"`
+	Errors      []string `json:"errors"`
+}
+
+// Sorted by ascending order of count of failures. Tests with no failures
+// are skipped.
+func computeStatsMostFailures(results []ginkgoResult) []StatsMostFailures {
+	type count struct {
+		passed int
+		failed []string
+	}
+
+	// The key is the test name. The value is a list of failure messages.
+	countMap := make(map[string]count)
+
+	var testNames []string
+	for _, test := range results {
+		if test.Status != statusFailed && test.Status != statusPassed {
+			continue
+		}
+
+		if _, ok := countMap[test.Name]; !ok {
+			testNames = append(testNames, test.Name)
+			countMap[test.Name] = count{}
+		}
+
+		cur := countMap[test.Name]
+		switch test.Status {
+		case statusPassed:
+			cur.passed += 1
+		case statusFailed:
+			cur.failed = append(cur.failed, test.Err)
+		}
+		countMap[test.Name] = cur
+	}
+
+	sort.Slice(testNames, func(i, j int) bool {
+		return len(countMap[testNames[i]].failed) < len(countMap[testNames[j]].failed)
+	})
+
+	var stats []StatsMostFailures
+	for _, name := range testNames {
+		if len(countMap[name].failed) == 0 {
+			continue
+		}
+
+		stats = append(stats, StatsMostFailures{
+			Name:        name,
+			CountPassed: countMap[name].passed,
+			CountFailed: len(countMap[name].failed),
+			Errors:      countMap[name].failed,
 		})
 	}
 	return stats
