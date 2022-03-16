@@ -32,9 +32,9 @@ import (
 )
 
 var (
-	bucketName   = "jetstack-logs"
-	bucketPrefix = "pr-logs/pull/jetstack_cert-manager"
-	cacheDir     = os.Getenv("HOME") + "/.cache/prowdig/" + bucketName
+	bucketName     = "jetstack-logs"
+	bucketPrefixes = []string{"pr-logs/pull/jetstack_cert-manager", "pr-logs/pull/cert-manager_cert-manager"}
+	cacheDir       = os.Getenv("HOME") + "/.cache/prowdig/" + bucketName
 
 	endsWithPRNumber    = regexp.MustCompile(`/(\d+)/?$`)
 	rmAnsiColors        = regexp.MustCompile(`\x1B\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]`)
@@ -42,7 +42,7 @@ var (
 	isParen             = regexp.MustCompile(" *}$")
 	isJunitFile         = regexp.MustCompile(`junit__.*\.xml$`)
 	isBuildLogFile      = regexp.MustCompile(`build-log\.txt$`)
-	isJunitOrBuildLog   = regexp.MustCompile("(" + isJunitFile.String() + "|" + isBuildLogFile.String() + ")")
+	isToBeDownloaded    = regexp.MustCompile("(" + isJunitFile.String() + "|" + isBuildLogFile.String() + ")")
 	reObjectName        = regexp.MustCompile(`/(\d+)\/([^\/]+)\/(\d+)\/`)
 
 	red   = color.New(color.FgRed).SprintFunc()
@@ -110,8 +110,9 @@ var CLI struct {
 		} `cmd:"" help:"Parse the Ginkgo failure blocks from a given file or URL."`
 
 		List struct {
-			Limit  int    `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
-			Filter string `help:"Only list tests for which the name contains the given string."`
+			Limit      int    `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+			Name       string `help:"Only list tests for which the name contains the given string."`
+			OnlyFailed bool   `help:"Hide tests that have the status 'passed' or 'error'."`
 		} `cmd:"" help:"Lists all the test results ordered by name. The logs are fetched from the bucket."`
 
 		MaxDuration struct {
@@ -236,14 +237,14 @@ func main() {
 
 	case "tests max-duration":
 		if !CLI.NoDownload {
-			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit, isJunitOrBuildLog)
+			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit, isToBeDownloaded)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
 				os.Exit(1)
 			}
 		}
 
-		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefix, CLI.Tests.MaxDuration.Limit)
+		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefixes, CLI.Tests.MaxDuration.Limit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
 			os.Exit(1)
@@ -279,29 +280,32 @@ func main() {
 
 	case "tests list":
 		if !CLI.NoDownload {
-			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit, isJunitOrBuildLog)
+			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit, isToBeDownloaded)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
 				os.Exit(1)
 			}
 		}
 
-		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefix, CLI.Tests.List.Limit)
+		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefixes, CLI.Tests.List.Limit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
 			os.Exit(1)
 		}
 
-		// Filter using the glob pattern.
-		if CLI.Tests.List.Filter != "" {
-			var filtered []ginkgoResult
-			for _, res := range results {
-				if strings.Contains(res.Name, CLI.Tests.List.Filter) {
-					filtered = append(filtered, res)
-				}
+		var filtered []ginkgoResult
+		for _, res := range results {
+			if !strings.Contains(res.Name, CLI.Tests.List.Name) {
+				continue
 			}
-			results = filtered
+
+			if CLI.Tests.List.OnlyFailed && res.Status != statusFailed {
+				continue
+			}
+
+			filtered = append(filtered, res)
 		}
+		results = filtered
 
 		sort.Slice(results, func(i, j int) bool {
 			return strings.Compare(results[i].Name, results[j].Name) < 0
@@ -348,7 +352,7 @@ func main() {
 			}
 		}
 
-		results, err := parseBuildsFromCache(bucketPrefix, CLI.Jobs.List.Limit)
+		results, err := parseBuildsFromCache(bucketPrefixes, CLI.Jobs.List.Limit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to fetch build results from files: %v\n", err)
 			os.Exit(1)
@@ -636,7 +640,7 @@ func downloadBuildArtifactsToCache(bucketName string, maxJobs int, filter *regex
 			time.Sleep(200 * time.Millisecond)
 		}
 	}()
-	prPrefixes, err := listPRPrefixes(bucket, bucketPrefix)
+	prPrefixes, err := listPRPrefixes(bucket, bucketPrefixes)
 	if err != nil {
 		return fmt.Errorf("failed to list PR prefixes: %v", err)
 	}
@@ -721,9 +725,9 @@ func downloadBuildArtifactsToCache(bucketName string, maxJobs int, filter *regex
 
 // The "bucket" string in input is used for displaying and logging. It is not
 // used to fetch anything from GCS.
-func parseGinkgoResultsFromCache(bucketName string, bucketPrefix string, maxJobs int) ([]ginkgoResult, error) {
+func parseGinkgoResultsFromCache(bucketName string, bucketPrefixes []string, maxJobs int) ([]ginkgoResult, error) {
 	// Let's only select the last few PRs.
-	artifacts, err := findCachedArtifacts(bucketPrefix, maxJobs)
+	artifacts, err := findCachedArtifacts(bucketPrefixes, maxJobs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find cached artifacts: %v", err)
 	}
@@ -731,7 +735,7 @@ func parseGinkgoResultsFromCache(bucketName string, bucketPrefix string, maxJobs
 	var ginkgoResults []ginkgoResult
 	for _, artifact := range artifacts {
 
-		if !isJunitOrBuildLog.MatchString(artifact) {
+		if !isToBeDownloaded.MatchString(artifact) {
 			continue
 		}
 
@@ -796,7 +800,7 @@ func parseGinkgoResultsFromCache(bucketName string, bucketPrefix string, maxJobs
 				})
 			}
 		default:
-			return nil, fmt.Errorf("developer mistake: expected name %s but got %s", isJunitOrBuildLog.String(), url)
+			return nil, fmt.Errorf("developer mistake: expected name %s but got %s", isToBeDownloaded.String(), url)
 		}
 	}
 	return ginkgoResults, nil
@@ -828,9 +832,9 @@ type BuildResult struct {
 
 // The "bucket" string in input is used for displaying and logging. It is not
 // used to fetch anything from GCS.
-func parseBuildsFromCache(bucketPrefix string, maxJobs int) ([]BuildResult, error) {
+func parseBuildsFromCache(bucketPrefixes []string, maxJobs int) ([]BuildResult, error) {
 	// Let's only select the last few PRs.
-	artifacts, err := findCachedArtifacts(bucketPrefix, maxJobs)
+	artifacts, err := findCachedArtifacts(bucketPrefixes, maxJobs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find cached artifacts: %v", err)
 	}
@@ -971,21 +975,22 @@ func parseBuildsFromCache(bucketPrefix string, maxJobs int) ([]BuildResult, erro
 	return results, nil
 }
 
-func findCachedArtifacts(bucketPrefix string, maxJobs int) ([]string, error) {
-	prDirEntries, err := os.ReadDir(cacheDir + "/" + bucketPrefix)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read current directory: %v", err)
-	}
-
+func findCachedArtifacts(bucketPrefixes []string, maxJobs int) ([]string, error) {
 	var prDirs []string
-	for _, dirEntry := range prDirEntries {
-		if !dirEntry.IsDir() {
-			continue
+	for _, bucketPrefix := range bucketPrefixes {
+		prDirEntries, err := os.ReadDir(cacheDir + "/" + bucketPrefix)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read current directory: %v", err)
 		}
-		prDirs = append(prDirs, cacheDir+"/"+bucketPrefix+"/"+dirEntry.Name())
+		for _, dirEntry := range prDirEntries {
+			if !dirEntry.IsDir() {
+				continue
+			}
+			prDirs = append(prDirs, cacheDir+"/"+bucketPrefix+"/"+dirEntry.Name())
+		}
 	}
 
-	prDirs, err = sortNumericDesc(prDirs)
+	prDirs, err := sortNumericDesc(prDirs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sort PR prefixes: %w", err)
 	}
@@ -1132,30 +1137,34 @@ func parseJunit(bytes []byte) ([]parsedGinkgoBlock, error) {
 //  pr-logs/pull/jetstack_cert-manager/2/
 //  pr-logs/pull/jetstack_cert-manager/1/
 //  <----------- prefix ------------->
-func listPRPrefixes(bucket *storage.BucketHandle, prefix string) ([]string, error) {
-	if !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
+func listPRPrefixes(bucket *storage.BucketHandle, prefixes []string) ([]string, error) {
+	for i := range prefixes {
+		if !strings.HasSuffix(prefixes[i], "/") {
+			prefixes[i] += "/"
+		}
 	}
 
-	prIter := bucket.Objects(context.Background(), &storage.Query{
-		Prefix: prefix, Delimiter: "/", Projection: storage.ProjectionNoACL,
-	})
-
 	var prPrefixes []string
-	for {
-		pr, err := prIter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to iterate over GCS objects: %v", err)
-		}
+	for _, prefix := range prefixes {
+		prIter := bucket.Objects(context.Background(), &storage.Query{
+			Prefix: prefix, Delimiter: "/", Projection: storage.ProjectionNoACL,
+		})
 
-		if !endsWithPRNumber.MatchString(pr.Prefix) {
-			continue
-		}
+		for {
+			pr, err := prIter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to iterate over GCS objects: %v", err)
+			}
 
-		prPrefixes = append(prPrefixes, pr.Prefix)
+			if !endsWithPRNumber.MatchString(pr.Prefix) {
+				continue
+			}
+
+			prPrefixes = append(prPrefixes, pr.Prefix)
+		}
 	}
 
 	prPrefixes, err := sortNumericDesc(prPrefixes)
