@@ -732,8 +732,23 @@ func parseGinkgoResultsFromCache(bucketName string, bucketPrefixes []string, max
 		return nil, fmt.Errorf("failed to find cached artifacts: %v", err)
 	}
 
+	bar := pb.NewOptions(len(artifacts),
+		pb.OptionSetWriter(os.Stderr),
+		pb.OptionSetPredictTime(true),
+		pb.OptionShowCount(),
+		pb.OptionEnableColorCodes(true),
+		pb.OptionShowBytes(false),
+		pb.OptionSetDescription("Parsing logs..."),
+		pb.OptionSetTheme(theme),
+	)
+	defer func() {
+		_ = bar.Finish()
+		_ = bar.Clear()
+	}()
+
 	var ginkgoResults []ginkgoResult
 	for _, artifact := range artifacts {
+		bar.Add(1)
 
 		if !isToBeDownloaded.MatchString(artifact) {
 			continue
