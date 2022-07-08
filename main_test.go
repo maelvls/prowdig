@@ -256,18 +256,18 @@ test/e2e/framework/framework.go:283
 # Example with ANSI color codes
 #
 
-[91m[1m• Failure [309.036 seconds][0m
+• Failure [309.036 seconds]
 [cert-manager] Vault ClusterIssuer CertificateRequest (AppRole)
-[90mtest/e2e/framework/framework.go:283[0m
-  [91m[1mshould generate a new certificate with Vault configured maximum TTL duration (90 days) when requested duration is greater than TTL [It][0m
-  [90mtest/e2e/suite/issuers/vault/certificaterequest/approle.go:215[0m
+test/e2e/framework/framework.go:283
+  should generate a new certificate with Vault configured maximum TTL duration (90 days) when requested duration is greater than TTL [It]
+  test/e2e/suite/issuers/vault/certificaterequest/approle.go:215
 
-  [91mUnexpected error:
+  Unexpected error:
       <*errors.errorString | 0xc00024a7a0>: {
           s: "timed out waiting for the condition",
       }
       timed out waiting for the condition
-  occurred[0m
+  occurred
 
   test/e2e/suite/issuers/vault/certificaterequest/approle.go:270
 ------------------------------
@@ -306,13 +306,13 @@ test/e2e/framework/framework.go:283
 
   test/e2e/suite/secrettemplate/secrettemplate.go:202
 ------------------------------
-[91m[1m• Failure [71.567 seconds][0m
+• Failure [71.567 seconds]
 [cert-manager] Vault Issuer
-[90mtest/e2e/framework/framework.go:266[0m
-  [91m[1mshould be ready with a valid Kubernetes Role and ServiceAccount Secret [It][0m
-  [90mtest/e2e/suite/issuers/vault/issuer.go:180[0m
+test/e2e/framework/framework.go:266
+  should be ready with a valid Kubernetes Role and ServiceAccount Secret [It]
+  test/e2e/suite/issuers/vault/issuer.go:180
 
-  [91mUnexpected error:
+  Unexpected error:
       <*errors.errorString | 0xc000d55bb0>: {
           s: "timed out waiting for the condition: Last Status: 'False' Reason: 'VaultError', Message: 'Failed to initialize Vault client: error reading Kubernetes service account token from vault-serviceaccount: error calling Vault server: Error making API request.\n\nURL: POST https://vault.e2e-tests-create-vault-issuer-klmxs:8200/v1/auth/kubernetes/login\nCode: 403. Errors:\n\n* permission denied'",
       }
@@ -322,25 +322,25 @@ test/e2e/framework/framework.go:283
       Code: 403. Errors:
       
       * permission denied'
-  occurred[0m
+  occurred
 
   test/e2e/suite/issuers/vault/issuer.go:200
-[90m------------------------------[0m
-[91m[1m• Failure in Spec Setup (BeforeEach) [61.637 seconds][0m
+------------------------------
+• Failure in Spec Setup (BeforeEach) [61.637 seconds]
 [cert-manager] ACME CertificateRequest (HTTP01)
-[90mtest/e2e/framework/framework.go:283[0m
-  [91m[1mshould automatically recreate challenge pod and still obtain a certificate if it is manually deleted [BeforeEach][0m
-  [90mtest/e2e/suite/issuers/acme/certificaterequest/http01.go:207[0m
+test/e2e/framework/framework.go:283
+  should automatically recreate challenge pod and still obtain a certificate if it is manually deleted [BeforeEach]
+  test/e2e/suite/issuers/acme/certificaterequest/http01.go:207
 
-  [91mUnexpected error:
+  Unexpected error:
       <*errors.errorString | 0xc000234850>: {
           s: "timed out waiting for the condition",
       }
       timed out waiting for the condition
-  occurred[0m
+  occurred
 
   test/e2e/suite/issuers/acme/certificaterequest/http01.go:93
-[90m------------------------------[0m
+------------------------------
 `
 
 var exampleGingkoBlock1 = `• Failure [0.510 seconds]
@@ -474,6 +474,80 @@ test/e2e/framework/framework.go:287
 
     test/e2e/suite/conformance/certificates/tests.go:819
 ------------------------------
+[BeforeEach] CertificateSigningRequest with issuer type Vault AppRole Custom Auth Path ClusterIssuer With Root CA
+  test/e2e/framework/framework.go:111
+STEP: Creating a kubernetes client
+STEP: Creating an API extensions client
+STEP: Creating a cert manager client
+STEP: Creating a controller-runtime client
+STEP: Creating a gateway-api client
+STEP: Building a namespace api object
+STEP: Using the namespace e2e-tests-certificatesigningrequests-r585z
+STEP: Building a ResourceQuota api object
+[BeforeEach] CertificateSigningRequest with issuer type Vault AppRole Custom Auth Path ClusterIssuer With Root CA
+  test/e2e/suite/conformance/certificatesigningrequests/tests.go:65
+[It] should issue a certificate that defines a Common Name, DNS Name, and sets a duration
+  test/e2e/suite/conformance/certificatesigningrequests/suite.go:109
+STEP: Creating an issuer resource
+STEP: Creating a VaultAppRole ClusterIssuer
+NAME: chart-vault-cm-e2e-create-vault-issuer
+LAST DEPLOYED: Wed Jul  6 13:12:42 2022
+NAMESPACE: e2e-tests-certificatesigningrequests-r585z
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+STEP: Waiting 2m0s for all pods in namespace 'e2e-tests-certificatesigningrequests-r585z' to be Ready
+Jul  6 13:13:15.824: INFO:  (took 0s)
+STEP: Configuring the VaultAppRole server
+[AfterEach] CertificateSigningRequest with issuer type Vault AppRole Custom Auth Path ClusterIssuer With Root CA
+  test/e2e/framework/framework.go:112
+STEP: Deleting test namespace
+
+
+• Failure [46.524 seconds]
+[Conformance] CertificateSigningRequests
+test/e2e/framework/framework.go:276
+  CertificateSigningRequest with issuer type Vault AppRole Custom Auth Path ClusterIssuer With Root CA
+  test/e2e/suite/conformance/certificatesigningrequests/tests.go:51
+    should issue a certificate that defines a Common Name, DNS Name, and sets a duration [It]
+    test/e2e/suite/conformance/certificatesigningrequests/suite.go:109
+
+    failed to create vault issuer
+    Unexpected error:
+        <*errors.StatusError | 0xc00167a000>: {
+            ErrStatus: {
+                TypeMeta: {Kind: "", APIVersion: ""},
+                ListMeta: {
+                    SelfLink: "",
+                    ResourceVersion: "",
+                    Continue: "",
+                    RemainingItemCount: nil,
+                },
+                Status: "Failure",
+                Message: "Internal error occurred: failed calling webhook \"webhook.cert-manager.io\": failed to call webhook: Post \"https://cert-manager-webhook.cert-manager.svc:443/mutate?timeout=10s\": dial tcp 10.96.191.224:443: connect: connection refused",
+                Reason: "InternalError",
+                Details: {
+                    Name: "",
+                    Group: "",
+                    Kind: "",
+                    UID: "",
+                    Causes: [
+                        {
+                            Type: "",
+                            Message: "failed calling webhook \"webhook.cert-manager.io\": failed to call webhook: Post \"https://cert-manager-webhook.cert-manager.svc:443/mutate?timeout=10s\": dial tcp 10.96.191.224:443: connect: connection refused",
+                            Field: "",
+                        },
+                    ],
+                    RetryAfterSeconds: 0,
+                },
+                Code: 500,
+            },
+        }
+        Internal error occurred: failed calling webhook "webhook.cert-manager.io": failed to call webhook: Post "https://cert-manager-webhook.cert-manager.svc:443/mutate?timeout=10s": dial tcp 10.96.191.224:443: connect: connection refused
+    occurred
+
+    test/e2e/suite/conformance/certificatesigningrequests/vault/approle.go:182
+------------------------------
 `
 
 func Test_computeStatsMostFailures(t *testing.T) {
@@ -498,8 +572,7 @@ func Test_computeStatsMostFailures(t *testing.T) {
 			Job:      "e2e-v1-13",
 			PR:       1234,
 			Build:    14578011101239,
-		}},
-	}, {
+		}}}, {
 		Name:        "[Conformance] Certificates with issuer type ACME HTTP01 Issuer (Ingress) Creating a Gateway with annotations for issuerRef and other Certificate fields",
 		CountPassed: 0,
 		CountFailed: 1,
@@ -512,7 +585,19 @@ func Test_computeStatsMostFailures(t *testing.T) {
 			Job:      "e2e-v1-13",
 			PR:       1234,
 			Build:    14578011101239,
+		}}}, {
+		Name:        "[Conformance] CertificateSigningRequests CertificateSigningRequest with issuer type Vault AppRole Custom Auth Path ClusterIssuer With Root CA should issue a certificate that defines a Common Name, DNS Name, and sets a duration",
+		CountPassed: 0,
+		CountFailed: 1,
+		Errors: []GinkgoResult{{Name: "[Conformance] CertificateSigningRequests CertificateSigningRequest with issuer type Vault AppRole Custom Auth Path ClusterIssuer With Root CA should issue a certificate that defines a Common Name, DNS Name, and sets a duration",
+			Status:   "failed",
+			Duration: 46,
+			Err:      "failed to create vault issuer\nInternal error occurred: failed calling webhook \"webhook.cert-manager.io\": failed to call webhook: Post \"https://cert-manager-webhook.cert-manager.svc:443/mutate?timeout=10s\": dial tcp 10.96.191.224:443: connect: connection refused",
+			ErrLoc:   "test/e2e/suite/conformance/certificatesigningrequests/vault/approle.go:182",
+			Source:   "url#line=112",
+			Job:      "e2e-v1-13",
+			PR:       1234,
+			Build:    14578011101239,
 		}},
-	},
-	}, got)
+	}}, got)
 }

@@ -576,15 +576,16 @@ func parseGinkgoBlock(block ginkgoBlock) (parsedGinkgoBlock, error) {
 	//   test/e2e/suite/conformance/tests.go:47              |
 	//     should issue an ECDSA, defaulted cert [It]        |
 	//     test/e2e/suite/conformance/suite.go:105           v
-	//                                                                 ^
-	//     Unexpected error:                                 ^         |
-	//         <*errors.errorString | 0xc0001c07d0>: {       |         |
-	//             s: "timed out waiting for the condition", | Err     |
-	//         }                                             |         | optional
-	//         timed out waiting for the condition           |         |
-	//     occurred                                          V         |
-	//                                                                 |
-	//     test/e2e/suite/conformance/tests.go:149          <- ErrLoc  v
+	//
+	//     failed to create issuer                          <- ErrHeader    ^
+	//     Unexpected error:                                 ^              |
+	//         <*errors.errorString | 0xc0001c07d0>: {       |              |
+	//             s: "timed out waiting for the condition", | Err          |
+	//         }                                             |              | optional
+	//         timed out waiting for the condition           |              |
+	//     occurred                                          V              |
+	//                                                                      |
+	//     test/e2e/suite/conformance/tests.go:149          <- ErrLoc       v
 	// ------------------------------                       <- Footer
 
 	// Header.
@@ -656,44 +657,55 @@ func parseGinkgoBlock(block ginkgoBlock) (parsedGinkgoBlock, error) {
 	}
 
 	// ErrLoc.
+	//
+	// We remove the ErrLoc lines from block.lines so that the remainder is
+	// only ErrHeader and Err.
 	errLoc := strings.TrimPrefix(block.lines[len(block.lines)-1], indent)
-
-	// Err.
-	// The "-2" skips the ErrLoc and the blank line between the Err and ErrLoc.
 	block.lines = block.lines[0 : len(block.lines)-2]
 
-	// Now let's deal with this overly verbose "Unexpected error... occurred" that looks like this:
-	//
-	//  Unexpected error:
-	//      <*errors.errorString | 0xc0001c07d0>: {
-	//          s: "timed out waiting for the condition",
-	//      }
-	//      timed out waiting for the condition
-	//  occurred
-	//
-	// Notice the indentation (4 spaces).
-	if block.lines[0] == "Unexpected error:" {
-		for i := range block.lines {
-			if !isParen.MatchString(block.lines[i]) {
-				continue
-			}
-			block.lines = block.lines[i+1 : len(block.lines)-1]
-			break
+	var errStr []string
+
+	// ErrHeader.
+	i = 0
+	for ; i < len(block.lines) && !strings.HasPrefix(block.lines[i], "Unexpected error:"); i++ {
+		if len(block.lines[i]) == 0 {
+			continue
 		}
-		for i := range block.lines {
-			block.lines[i] = strings.TrimPrefix(block.lines[i], "    ")
-		}
+		errStr = append(errStr, block.lines[i])
 	}
 
-	errStr := strings.Join(block.lines, "\n")
+	if i == len(block.lines) {
+		return parsedGinkgoBlock{name: name, status: status, duration: duration, errStr: strings.Join(errStr, "\n"), errLoc: errLoc}, nil
+	}
+	block.lines = block.lines[i:len(block.lines)]
 
-	return parsedGinkgoBlock{
-		name:     name,
-		status:   status,
-		duration: duration,
-		errStr:   errStr,
-		errLoc:   errLoc,
-	}, nil
+	// Err.
+	//
+	// Now let's deal with this overly verbose "Unexpected error: ...
+	// occured". Note that the ErrHeader has already been dealt with.
+	//
+	//    Unexpected error:
+	//        <*errors.errorString | 0xc0001c07d0>: {             ^
+	//            s: "timed out waiting for the condition",       |  Pre
+	//        }                                                   |
+	//        timed out waiting for the condition                 v
+	//    occurred
+	//
+	// Notice the indentation of 4 spaces in the lines between "Unexpected
+	// error:" and "occured".
+	for i := range block.lines {
+		if !isParen.MatchString(block.lines[i]) {
+			continue
+		}
+		block.lines = block.lines[i+1 : len(block.lines)-1]
+		break
+	}
+	for i := range block.lines {
+		block.lines[i] = strings.TrimPrefix(block.lines[i], "    ")
+	}
+
+	errStr = append(errStr, block.lines...)
+	return parsedGinkgoBlock{name: name, status: status, duration: duration, errStr: strings.Join(errStr, "\n"), errLoc: errLoc}, nil
 }
 
 // downloadBuildArtifactsToCache is a slow function that reads the Google
