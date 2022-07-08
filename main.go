@@ -1048,6 +1048,9 @@ func findCachedArtifacts(bucketPrefixes []string, maxJobs int) ([]string, error)
 	var prDirs []string
 	for _, bucketPrefix := range bucketPrefixes {
 		prDirEntries, err := os.ReadDir(cacheDir + "/" + bucketPrefix)
+		if os.IsNotExist(err) {
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to read current directory: %v", err)
 		}
