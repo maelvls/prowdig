@@ -5,52 +5,50 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_reGinkgoBlock(t *testing.T) {
-	block, err := parseGinkgoBlock(ginkgoBlock{line: 42, lines: strings.Split(exampleGingkoBlock1, "\n")}, "https://foo.bar/build-log.txt")
+	block, err := parseGinkgoBlock(ginkgoBlock{line: 42, lines: strings.Split(exampleGingkoBlock1, "\n")})
 	assert.NoError(t, err)
-	assert.Equal(t, ginkgoResult{
-		Name:     "[cert-manager] Approval CertificateRequests a service account with the approve permissions for cluster scoped issuers.example.io/* should be able to deny requests",
-		Status:   "failed",
-		Duration: 0,
-		Err:      "admission webhook \"webhook.cert-manager.io\" denied the request: spec.issuerRef: Forbidden: referenced signer resource does not exist: {test-issuer Issuer bycbn.example.io}",
-		ErrLoc:   "test/e2e/suite/approval/approval.go:233",
-		Source:   "https://foo.bar/build-log.txt#line=42",
+	assert.Equal(t, parsedGinkgoBlock{
+		name:     "[cert-manager] Approval CertificateRequests a service account with the approve permissions for cluster scoped issuers.example.io/* should be able to deny requests",
+		status:   "failed",
+		duration: 0,
+		errStr:   "admission webhook \"webhook.cert-manager.io\" denied the request: spec.issuerRef: Forbidden: referenced signer resource does not exist: {test-issuer Issuer bycbn.example.io}",
+		errLoc:   "test/e2e/suite/approval/approval.go:233",
 	}, block)
 
-	block, err = parseGinkgoBlock(ginkgoBlock{line: 123, lines: strings.Split(exampleGingkoBlock2, "\n")}, "/file/build-log.txt")
+	block, err = parseGinkgoBlock(ginkgoBlock{line: 123, lines: strings.Split(exampleGingkoBlock2, "\n")})
 	assert.NoError(t, err)
-	assert.Equal(t, ginkgoResult{
-		Name:     "[Conformance] Certificates with issuer type SelfSigned ClusterIssuer should issue an ECDSA, defaulted certificate for a single distinct DNS Name",
-		Status:   "failed",
-		Duration: 301,
-		Err:      "timed out waiting for the condition",
-		ErrLoc:   "test/e2e/suite/conformance/certificates/tests.go:149",
-		Source:   "/file/build-log.txt:123",
+	assert.Equal(t, parsedGinkgoBlock{
+		name:     "[Conformance] Certificates with issuer type SelfSigned ClusterIssuer should issue an ECDSA, defaulted certificate for a single distinct DNS Name",
+		status:   "failed",
+		duration: 301,
+		errStr:   "timed out waiting for the condition",
+		errLoc:   "test/e2e/suite/conformance/certificates/tests.go:149",
+		// Source:   "/file/build-log.txt:123",
 	}, block)
 
-	block, err = parseGinkgoBlock(ginkgoBlock{line: 456, lines: strings.Split(exampleGingkoBlock3, "\n")}, "/file/build-log.txt")
+	block, err = parseGinkgoBlock(ginkgoBlock{line: 456, lines: strings.Split(exampleGingkoBlock3, "\n")})
 	assert.NoError(t, err)
-	assert.Equal(t, ginkgoResult{
-		Name:     "[cert-manager] Certificate SecretTemplate should update the values of keys that have been modified in the SecretTemplate",
-		Status:   "failed",
-		Duration: 6,
-		Err:      "Timed out after 5.000s.\nExpected\n    <map[string]string | len:10>: {\n        \"foo\": \"bar\",\n        \"bar\": \"foo\",\n        \"cert-manager.io/ip-sans\": \"\",\n        \"cert-manager.io/issuer-group\": \"cert-manager.io\",\n        \"cert-manager.io/issuer-kind\": \"Issuer\",\n        \"cert-manager.io/issuer-name\": \"certificate-secret-template\",\n        \"cert-manager.io/uri-sans\": \"\",\n        \"cert-manager.io/alt-names\": \"\",\n        \"cert-manager.io/certificate-name\": \"test-secret-template-qbwsc\",\n        \"cert-manager.io/common-name\": \"test\",\n    }\nto have {key: value}\n    <map[interface {}]interface {} | len:1>: {\n        <string>\"foo\": <string>\"123\",\n    }",
-		ErrLoc:   "test/e2e/suite/secrettemplate/secrettemplate.go:202",
-		Source:   "/file/build-log.txt:456",
+	assert.Equal(t, parsedGinkgoBlock{
+		name:     "[cert-manager] Certificate SecretTemplate should update the values of keys that have been modified in the SecretTemplate",
+		status:   "failed",
+		duration: 6,
+		errStr:   "Timed out after 5.000s.\nExpected\n    <map[string]string | len:10>: {\n        \"foo\": \"bar\",\n        \"bar\": \"foo\",\n        \"cert-manager.io/ip-sans\": \"\",\n        \"cert-manager.io/issuer-group\": \"cert-manager.io\",\n        \"cert-manager.io/issuer-kind\": \"Issuer\",\n        \"cert-manager.io/issuer-name\": \"certificate-secret-template\",\n        \"cert-manager.io/uri-sans\": \"\",\n        \"cert-manager.io/alt-names\": \"\",\n        \"cert-manager.io/certificate-name\": \"test-secret-template-qbwsc\",\n        \"cert-manager.io/common-name\": \"test\",\n    }\nto have {key: value}\n    <map[interface {}]interface {} | len:1>: {\n        <string>\"foo\": <string>\"123\",\n    }",
+		errLoc:   "test/e2e/suite/secrettemplate/secrettemplate.go:202",
 	}, block)
 
-	block, err = parseGinkgoBlock(ginkgoBlock{line: 789, lines: strings.Split(exampleGingkoBlock4, "\n")}, "/file/build-log.txt")
+	block, err = parseGinkgoBlock(ginkgoBlock{line: 789, lines: strings.Split(exampleGingkoBlock4, "\n")})
 	assert.NoError(t, err)
-	assert.Equal(t, ginkgoResult(ginkgoResult{
-		Name:     "[cert-manager] ACME CertificateRequest (HTTP01) should automatically recreate challenge pod and still obtain a certificate if it is manually deleted [BeforeEach]",
-		Status:   "error",
-		Duration: 61,
-		Err:      "timed out waiting for the condition",
-		ErrLoc:   "test/e2e/suite/issuers/acme/certificaterequest/http01.go:93",
-		Source:   "/file/build-log.txt:789",
-	}), block)
+	assert.Equal(t, parsedGinkgoBlock{
+		name:     "[cert-manager] ACME CertificateRequest (HTTP01) should automatically recreate challenge pod and still obtain a certificate if it is manually deleted [BeforeEach]",
+		status:   "error",
+		duration: 61,
+		errStr:   "timed out waiting for the condition",
+		errLoc:   "test/e2e/suite/issuers/acme/certificaterequest/http01.go:93",
+	}, block)
 }
 
 func Test_parseBuildLog(t *testing.T) {
@@ -435,3 +433,86 @@ test/e2e/framework/framework.go:283
 
   test/e2e/suite/issuers/acme/certificaterequest/http01.go:93
 ------------------------------`
+
+// Tests that have been retried e.g. with FLAKE_ATTEMPTS=2 should not count
+// twice in the total number of tests.
+var exampleGingkoBlock5 = `
+STEP: Deleting test namespace
+
+• Failure [300.969 seconds]
+[Conformance] Certificates with External Account Binding
+test/e2e/framework/framework.go:287
+  with issuer type ACME HTTP01 Issuer (Gateway)
+  test/e2e/suite/conformance/certificates/tests.go:47
+    Creating a Gateway with annotations for issuerRef and other Certificate fields [It]
+    test/e2e/suite/conformance/certificates/suite.go:105
+
+    Unexpected error:
+        <*errors.errorString | 0xc000242850>: {
+            s: "timed out waiting for the condition",
+        }
+        timed out waiting for the condition
+    occurred
+
+    test/e2e/suite/conformance/certificates/tests.go:819
+------------------------------
+
+• Failure [300.851 seconds]
+[Conformance] Certificates
+test/e2e/framework/framework.go:287
+  with issuer type ACME HTTP01 Issuer (Ingress)
+  test/e2e/suite/conformance/certificates/tests.go:47
+    Creating a Gateway with annotations for issuerRef and other Certificate fields [It]
+    test/e2e/suite/conformance/certificates/suite.go:105
+
+    Unexpected error:
+        <*errors.errorString | 0xc0001c2850>: {
+            s: "timed out waiting for the condition",
+        }
+        timed out waiting for the condition
+    occurred
+
+    test/e2e/suite/conformance/certificates/tests.go:819
+------------------------------
+`
+
+func Test_computeStatsMostFailures(t *testing.T) {
+	blocks, err := parseBuildLog([]byte(exampleGingkoBlock5))
+	require.NoError(t, err)
+
+	results, err := ginkgoBlocksToGinkgoResults("url", "e2e-v1-13", 1234, 14578011101239, blocks)
+	require.NoError(t, err)
+
+	got := computeStatsMostFailures(results)
+
+	assert.Equal(t, []StatsMostFailures{{
+		Name:        "[Conformance] Certificates with External Account Binding with issuer type ACME HTTP01 Issuer (Gateway) Creating a Gateway with annotations for issuerRef and other Certificate fields",
+		CountPassed: 0,
+		CountFailed: 1,
+		Errors: []GinkgoResult{{Name: "[Conformance] Certificates with External Account Binding with issuer type ACME HTTP01 Issuer (Gateway) Creating a Gateway with annotations for issuerRef and other Certificate fields",
+			Status:   "failed",
+			Duration: 300,
+			Err:      "timed out waiting for the condition",
+			ErrLoc:   "test/e2e/suite/conformance/certificates/tests.go:819",
+			Source:   "url#line=20",
+			Job:      "e2e-v1-13",
+			PR:       1234,
+			Build:    14578011101239,
+		}},
+	}, {
+		Name:        "[Conformance] Certificates with issuer type ACME HTTP01 Issuer (Ingress) Creating a Gateway with annotations for issuerRef and other Certificate fields",
+		CountPassed: 0,
+		CountFailed: 1,
+		Errors: []GinkgoResult{{Name: "[Conformance] Certificates with issuer type ACME HTTP01 Issuer (Ingress) Creating a Gateway with annotations for issuerRef and other Certificate fields",
+			Status:   "failed",
+			Duration: 300,
+			Err:      "timed out waiting for the condition",
+			ErrLoc:   "test/e2e/suite/conformance/certificates/tests.go:819",
+			Source:   "url#line=38",
+			Job:      "e2e-v1-13",
+			PR:       1234,
+			Build:    14578011101239,
+		}},
+	},
+	}, got)
+}

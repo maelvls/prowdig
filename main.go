@@ -65,7 +65,7 @@ const (
 
 // Watch out, one test case outcome may appear twice in the array of testcases.
 // We do not do de-duplication yet.
-type ginkgoResult struct {
+type GinkgoResult struct {
 	// The Name of the ginkgo result is of the form:
 	//  [Conformance] Certificates with issuer type External ClusterIssuer should issue a cert with wildcard DNS Name
 	// Note that the string '[It]' does not appear in the test Name.
@@ -104,6 +104,10 @@ type ginkgoResult struct {
 }
 
 var CLI struct {
+	Download struct {
+		Limit int    `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+		Regex string `help:"Only download the files that match the given regex." kind:"regexflag"`
+	} `cmd:"" help:"Download the test artifacts from the GCS bucket into ~/cache/prowdig. Not all artifacts are downloaded, only the ones that match the regex given with --regex."`
 	Tests struct {
 		Output    string `help:"Output format. Can be either 'text' or 'json'." short:"o" default:"text" enum:"text,json"`
 		ParseLogs struct {
@@ -126,7 +130,6 @@ var CLI struct {
 			NoDownload bool `help:"Only use the local cache, do not download anything from the GCS bucket."`
 		} `cmd:"" help:"Lists the test names that fail the most. Two numbers are shown: the count of passed and the count of failed tests. The last error message is shown right after the test name. The list is sorted in descending order by the count of failed tests."`
 	} `cmd:"" help:"Everything related to individual test cases."`
-
 	Jobs struct {
 		Output string `help:"Output format. Can be either 'text' or 'json'." short:"o" default:"text" enum:"text,json"`
 		List   struct {
@@ -135,10 +138,21 @@ var CLI struct {
 	} `cmd:"" help:"Everything related to jobs."`
 	NoDownload bool   `help:"If a command is meant to fetch from GCS, only use the local cache, do not download anything."`
 	Color      string `help:"Change the coloring behavior. Can be one of auto, never, or always." enum:"auto,never,always" default:"auto"`
+	Debug      bool   `help:"Print debug information."`
 }
 
 func main() {
-	kongctx := kong.Parse(&CLI)
+	kongctx := kong.Parse(&CLI,
+		kong.Description("Prowdig copies the logs from the Google Storage buckets in which the cert-manager logs are contained to ~/.cache/prowdig and then tells you things about the Prow jobs, e.g., the most failing jobs. The folder ~/.cache/prowdig is not configurable for now. It may grow bigger than 10GB if you set a high --limit."),
+		kong.ValueFormatter(func(value *kong.Value) string {
+			switch value.Name {
+			case "regex":
+				value.Default = isToBeDownloaded.String()
+				return value.Help + " Default: " + value.Default + "."
+			}
+			return value.Help
+		}),
+	)
 
 	switch CLI.Color {
 	case "auto":
@@ -150,6 +164,28 @@ func main() {
 	}
 
 	switch kongctx.Command() {
+	case "download":
+		if CLI.NoDownload {
+			fmt.Fprint(os.Stderr, "error: cannot use --no-download with the download command.\n")
+			os.Exit(1)
+		}
+
+		if CLI.Download.Regex == "" {
+			CLI.Download.Regex = isToBeDownloaded.String()
+		}
+
+		regex, err := regexp.Compile(CLI.Download.Regex)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: --regex '%s' is an invalid regular expression: %v\n", CLI.Download.Regex, err)
+			os.Exit(1)
+		}
+
+		err = downloadBuildArtifactsToCache(bucketName, CLI.Download.Limit, regex)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "tests parse-logs <file-or-url>":
 		var bytes []byte
 		var err error
@@ -183,7 +219,7 @@ func main() {
 
 		// We don't use the syntax 'var results' so that the encoded JSON shows
 		// "[]" instead of "null".
-		results := []ginkgoResult{}
+		results := []GinkgoResult{}
 		for _, block := range blocks {
 			parsed, err := parseGinkgoBlock(block)
 			if err != nil {
@@ -195,7 +231,7 @@ func main() {
 				source = CLI.Tests.ParseLogs.FileOrURL + "#line=" + strconv.Itoa(block.line)
 			}
 
-			results = append(results, ginkgoResult{
+			results = append(results, GinkgoResult{
 				Name:     parsed.name,
 				Status:   parsed.status,
 				Duration: parsed.duration,
@@ -229,9 +265,9 @@ func main() {
 				case statusPassed:
 					fmt.Fprintf(w, "✅ %s\t%s\n", green(duration), res.Name)
 				case statusFailed:
-					fmt.Fprintf(w, "❌ %s\t%s: %s\n", red(duration), res.Name, res.Err)
+					fmt.Fprintf(w, "❌ %s\t%s: %s\n", red(duration), res.Name, gray(res.Err))
 				case statusError:
-					fmt.Fprintf(w, "💣️ %s\t%s: %s\n", blue(duration), res.Name, res.Err)
+					fmt.Fprintf(w, "💣️ %s\t%s: %s\n", blue(duration), res.Name, gray(res.Err))
 				default:
 					panic("developer mistake: unknown status: " + res.Status)
 				}
@@ -317,7 +353,7 @@ func main() {
 			for _, stat := range stats {
 				lastErr := ""
 				if len(stat.Errors) > 0 {
-					lastErr = stat.Errors[len(stat.Errors)-1]
+					lastErr = stat.Errors[len(stat.Errors)-1].Err
 				}
 				fmt.Fprintf(w, "%s\t%s\t%s: %s\n",
 					green(stat.CountPassed),
@@ -347,7 +383,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		var filtered []ginkgoResult
+		var filtered []GinkgoResult
 		for _, res := range results {
 			if !strings.Contains(res.Name, CLI.Tests.List.Name) {
 				continue
@@ -369,7 +405,7 @@ func main() {
 		case "json":
 			if results == nil {
 				// Force the encoded JSON to show "[]" instead of "null".
-				results = []ginkgoResult{}
+				results = []GinkgoResult{}
 			}
 			err = json.NewEncoder(os.Stdout).Encode(results)
 			if err != nil {
@@ -384,9 +420,9 @@ func main() {
 				case statusPassed:
 					fmt.Fprintf(w, "✅ %s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.Name)
 				case statusFailed:
-					fmt.Fprintf(w, "❌ %s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+					fmt.Fprintf(w, "❌ %s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.Name, gray(res.Err))
 				case statusError:
-					fmt.Fprintf(w, "💣️ %s\t%s: %s\n", blue((time.Duration(res.Duration) * time.Second).String()), res.Name, res.Err)
+					fmt.Fprintf(w, "💣️ %s\t%s: %s\n", blue((time.Duration(res.Duration) * time.Second).String()), res.Name, gray(res.Err))
 				default:
 					panic("developer mistake: unknown status: " + res.Status)
 				}
@@ -428,7 +464,7 @@ func main() {
 				case BuildSuccess:
 					fmt.Printf("%s\t%s\n", green((time.Duration(res.Duration) * time.Second).String()), res.JobName)
 				case BuildFailed:
-					fmt.Printf("%s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.JobName, res.Err)
+					fmt.Printf("%s\t%s: %s\n", red((time.Duration(res.Duration) * time.Second).String()), res.JobName, gray(res.Err))
 				default:
 					panic("developer mistake: unknown status: " + res.Status)
 				}
@@ -659,20 +695,55 @@ func parseGinkgoBlock(block ginkgoBlock) (parsedGinkgoBlock, error) {
 	}, nil
 }
 
-// Return a list of object names, e.g.:
-//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/artifacts/junit__01.xml
-//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/artifacts/junit__02.xml
-//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/build-log.txt
-//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/clone-log.txt
-//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/clone-records.json
-//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/finished.json
-//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/podinfo.json
-//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/prowjob.json
-//   pr-logs/pull/jetstack_cert-manager/1/pull-cert-manager-e2e-v1-13/232/started.json
-//   pr-logs/pull/jetstack_cert-manager/2/pull-cert-manager-e2e-v1-13/245/build-log.txt...
+// downloadBuildArtifactsToCache is a slow function that reads the Google
+// Storage bucket, and downloads the files found in the bucket onto your
+// disk in the hardcoded directory ~/.cache/prowdig.
+//
+// The argument "limit" corresponds to the maximum number of Prow builds to
+// be downloaded. The earliest builds are downloaded first. By earliest
+// builds, we mean the builds with the lowest build number. To understand
+// better the "limit" parameter, let us see what happens when we list
+// builds using gsutil:
+//
+//     gsutil ls "gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/**" | grep "build-log\.txt$"
+//                     <-----------> <------------------------------------>
+//                      bucket name               bucket prefix
+//
+// The output is:
+//
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
+//                                                                                            <----------------->
+//                                                                                                build number
+//
+// Using downloadBuildArtifactsToCache with the regex is "build-log\.txt$",
+// and the bucket is "jetstack-logs", you will see the following files
+// downloaded to ~/.cache/prowdig:
+//
+//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
+//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
+//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
+//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
+//
+// With limit=2, then only the last two build numbers get downloaded:
+//
+//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+//
+// For example, the last item of that list will be found at the path:
+//
+//   ~/.cache/prowdig/jetstack-logs/pr-logs/pull/jetstack_cert-manager/2/pull-cert-manager-e2e-v1-13/245/build-log.txt
+//   <--------------> <----------->
+//       hardcoded     bucket name
 //
 // The filter can be left nil.
-func downloadBuildArtifactsToCache(bucketName string, maxJobs int, filter *regexp.Regexp) error {
+func downloadBuildArtifactsToCache(bucketName string, limit int, filter *regexp.Regexp) error {
 	gcs, err := storage.NewClient(context.Background())
 	if err != nil {
 		return fmt.Errorf("error: Google Cloud storage: %v\n", err)
@@ -705,12 +776,12 @@ func downloadBuildArtifactsToCache(bucketName string, maxJobs int, filter *regex
 	var objects []storage.ObjectAttrs
 	totalSize := int64(0)
 
-	bar2 := pb.NewOptions(maxJobs,
+	bar2 := pb.NewOptions(limit,
 		pb.OptionSetWriter(os.Stderr),
 		pb.OptionSetPredictTime(false),
 		pb.OptionEnableColorCodes(true),
 		pb.OptionShowBytes(false),
-		pb.OptionSetDescription(fmt.Sprintf("Finding the last %d jobs...", maxJobs)),
+		pb.OptionSetDescription(fmt.Sprintf("Finding the last %d jobs...", limit)),
 		pb.OptionSetTheme(theme),
 	)
 	_ = bar2.RenderBlank()
@@ -720,7 +791,7 @@ func downloadBuildArtifactsToCache(bucketName string, maxJobs int, filter *regex
 			Prefix: prPrefix, Projection: storage.ProjectionNoACL,
 		})
 
-		for countJobs < maxJobs {
+		for countJobs < limit {
 			object, err := objectIter.Next()
 			if err == iterator.Done {
 				break
@@ -747,7 +818,7 @@ func downloadBuildArtifactsToCache(bucketName string, maxJobs int, filter *regex
 			objects = append(objects, *object)
 
 		}
-		if countJobs >= maxJobs {
+		if countJobs >= limit {
 			break
 		}
 	}
@@ -765,6 +836,9 @@ func downloadBuildArtifactsToCache(bucketName string, maxJobs int, filter *regex
 	)
 	_ = bar3.RenderBlank()
 	for _, object := range objects {
+		if CLI.Debug {
+			fmt.Fprintf(os.Stderr, "downloading %s\n", object.Name)
+		}
 		err := downloadToCache(&object, bucket)
 		if err != nil {
 			return fmt.Errorf("failed to download jobs artifacts for %s: %w", object.Name, err)
@@ -779,9 +853,9 @@ func downloadBuildArtifactsToCache(bucketName string, maxJobs int, filter *regex
 
 // The "bucket" string in input is used for displaying and logging. It is not
 // used to fetch anything from GCS.
-func parseGinkgoResultsFromCache(bucketName string, bucketPrefixes []string, maxJobs int) ([]ginkgoResult, error) {
+func parseGinkgoResultsFromCache(bucketName string, bucketPrefixes []string, countBuilds int) ([]GinkgoResult, error) {
 	// Let's only select the last few PRs.
-	artifacts, err := findCachedArtifacts(bucketPrefixes, maxJobs)
+	artifacts, err := findCachedArtifacts(bucketPrefixes, countBuilds)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find cached artifacts: %v", err)
 	}
@@ -800,11 +874,11 @@ func parseGinkgoResultsFromCache(bucketName string, bucketPrefixes []string, max
 		_ = bar.Clear()
 	}()
 
-	var ginkgoResults []ginkgoResult
+	var ginkgoResults []GinkgoResult
 	for _, artifact := range artifacts {
 		bar.Add(1)
 
-		if !isToBeDownloaded.MatchString(artifact) {
+		if !isJunitFile.MatchString(artifact) && !isBuildLogFile.MatchString(artifact) {
 			continue
 		}
 
@@ -831,7 +905,7 @@ func parseGinkgoResultsFromCache(bucketName string, bucketPrefixes []string, max
 			}
 
 			for _, parsed := range parsedBlocks {
-				ginkgoResults = append(ginkgoResults, ginkgoResult{
+				ginkgoResults = append(ginkgoResults, GinkgoResult{
 					Name:     parsed.name,
 					Duration: parsed.duration,
 					Status:   parsed.status,
@@ -845,34 +919,46 @@ func parseGinkgoResultsFromCache(bucketName string, bucketPrefixes []string, max
 			}
 
 		case isBuildLogFile.MatchString(artifact):
-			blocks, err := parseBuildLog(bytes)
+			parsedBlocks, err := parseBuildLog(bytes)
 			if err != nil {
-				return nil, fmt.Errorf("failed to parse build-log.txt file %s: %w", url, err)
+				return nil, fmt.Errorf("failed to parse the build-log.txt file %s: %w", url, err)
 			}
 
-			for _, block := range blocks {
-				parsed, err := parseGinkgoBlock(block)
-				if err != nil {
-					return nil, fmt.Errorf("failed to parse ginkgo block at line %d in %s: %w", block.line, url, err)
-				}
-
-				ginkgoResults = append(ginkgoResults, ginkgoResult{
-					Name:     parsed.name,
-					Duration: parsed.duration,
-					Status:   parsed.status,
-					Err:      parsed.errStr,
-					ErrLoc:   parsed.errLoc,
-					Source:   url + "#line=" + strconv.Itoa(block.line),
-					PR:       pr,
-					Job:      job,
-					Build:    build,
-				})
+			results, err := ginkgoBlocksToGinkgoResults(url, job, pr, build, parsedBlocks)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse one of the ginkgo blocks from the build-log.txt file %s: %w", url, err)
 			}
+
+			ginkgoResults = append(ginkgoResults, results...)
 		default:
 			return nil, fmt.Errorf("developer mistake: expected name %s but got %s", isToBeDownloaded.String(), url)
 		}
 	}
 	return ginkgoResults, nil
+}
+
+func ginkgoBlocksToGinkgoResults(url, job string, pr, build int, blocks []ginkgoBlock) ([]GinkgoResult, error) {
+	var results []GinkgoResult
+	for _, block := range blocks {
+		parsed, err := parseGinkgoBlock(block)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse ginkgo block at line %d in %s: %w", block.line, url, err)
+		}
+
+		results = append(results, GinkgoResult{
+			Name:     parsed.name,
+			Duration: parsed.duration,
+			Status:   parsed.status,
+			Err:      parsed.errStr,
+			ErrLoc:   parsed.errLoc,
+			Source:   url + "#line=" + strconv.Itoa(block.line),
+			PR:       pr,
+			Job:      job,
+			Build:    build,
+		})
+	}
+
+	return results, nil
 }
 
 type BuildStatus string
@@ -901,9 +987,9 @@ type BuildResult struct {
 
 // The "bucket" string in input is used for displaying and logging. It is not
 // used to fetch anything from GCS.
-func parseBuildsFromCache(bucketPrefixes []string, maxJobs int) ([]BuildResult, error) {
+func parseBuildsFromCache(bucketPrefixes []string, countBuilds int) ([]BuildResult, error) {
 	// Let's only select the last few PRs.
-	artifacts, err := findCachedArtifacts(bucketPrefixes, maxJobs)
+	artifacts, err := findCachedArtifacts(bucketPrefixes, countBuilds)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find cached artifacts: %v", err)
 	}
@@ -1044,7 +1130,58 @@ func parseBuildsFromCache(bucketPrefixes []string, maxJobs int) ([]BuildResult, 
 	return results, nil
 }
 
-func findCachedArtifacts(bucketPrefixes []string, maxJobs int) ([]string, error) {
+// The findCachedArtifacts function returns the paths of the artifacts that
+// have already been downloaded for a given bucket prefix. A bucket prefix
+// is the string that you would give to gsutil when trying to list all the
+// builds. For example, "pr-logs/pull/cert-manager_cert-manager" is a valid
+// bucket prefix that you could use to list builds:
+//
+//     gsutil ls "gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/**"
+//                                   <------------------------------------>
+//                                                bucket prefix
+//
+// Just for the sake of completeness, this gsutil command returns something
+// like this:
+//
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_bazel.xml
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_make-test-ci.xml
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/latest-build.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/artifacts/junit_bazel.xml
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/artifacts/junit_bazel.xml
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/artifacts/junit_bazel.xml
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/latest-build.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/artifacts/junit_bazel.xml
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/artifacts/junit_bazel.xml
+//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
+//                                                               <-->                         <----------------->
+//                                                             pr number                          build number
+//
+// In the case of findCachedArtifacts, imagining that the above artifacts
+// were previously downloaded by downloadBuildArtifactsToCache, then the
+// following paths get returned:
+//
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_bazel.xml
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_make-test-ci.xml
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/latest-build.txt
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/artifacts/junit_bazel.xml
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/artifacts/junit_bazel.xml
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/artifacts/junit_bazel.xml
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/latest-build.txt
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/artifacts/junit_bazel.xml
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/artifacts/junit_bazel.xml
+//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
+//
+func findCachedArtifacts(bucketPrefixes []string, countBuilds int) ([]string, error) {
 	var prDirs []string
 	for _, bucketPrefix := range bucketPrefixes {
 		prDirEntries, err := os.ReadDir(cacheDir + "/" + bucketPrefix)
@@ -1081,7 +1218,7 @@ func findCachedArtifacts(bucketPrefixes []string, maxJobs int) ([]string, error)
 
 			artifacts = append(artifacts, path)
 
-			if countJobs >= maxJobs {
+			if countJobs >= countBuilds {
 				return io.EOF
 			}
 
@@ -1090,7 +1227,7 @@ func findCachedArtifacts(bucketPrefixes []string, maxJobs int) ([]string, error)
 		if err != nil && err != io.EOF {
 			return nil, fmt.Errorf("failed to recurse into %s: %w", prDir, err)
 		}
-		if countJobs >= maxJobs {
+		if countJobs >= countBuilds {
 			break
 		}
 	}
@@ -1103,7 +1240,7 @@ type StatsMaxDuration struct {
 	MaxDurationFailed int    `json:"maxDurationFailed"`
 }
 
-func computeStatsMaxDuration(results []ginkgoResult) []StatsMaxDuration {
+func computeStatsMaxDuration(results []GinkgoResult) []StatsMaxDuration {
 	type max struct {
 		success int
 		failed  int
@@ -1160,18 +1297,18 @@ func computeStatsMaxDuration(results []ginkgoResult) []StatsMaxDuration {
 }
 
 type StatsMostFailures struct {
-	Name        string   `json:"name"`
-	CountPassed int      `json:"countPassed"`
-	CountFailed int      `json:"countFailed"`
-	Errors      []string `json:"errors"`
+	Name        string         `json:"name"`
+	CountPassed int            `json:"countPassed"`
+	CountFailed int            `json:"countFailed"`
+	Errors      []GinkgoResult `json:"errors"`
 }
 
 // Sorted by ascending order of count of failures. Tests with no failures
 // are skipped.
-func computeStatsMostFailures(results []ginkgoResult) []StatsMostFailures {
+func computeStatsMostFailures(results []GinkgoResult) []StatsMostFailures {
 	type count struct {
 		passed int
-		failed []string
+		failed []GinkgoResult
 	}
 
 	// The key is the test name. The value is a list of failure messages.
@@ -1193,7 +1330,7 @@ func computeStatsMostFailures(results []ginkgoResult) []StatsMostFailures {
 		case statusPassed:
 			cur.passed += 1
 		case statusFailed:
-			cur.failed = append(cur.failed, test.Err)
+			cur.failed = append(cur.failed, test)
 		}
 		countMap[test.Name] = cur
 	}
