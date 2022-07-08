@@ -105,7 +105,7 @@ type GinkgoResult struct {
 
 var CLI struct {
 	Download struct {
-		Limit int    `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+		Limit int    `help:"Limit the number of Prow builds for which we fetch the logs in the GCS bucket." default:"20"`
 		Regex string `help:"Only download the files that match the given regex." kind:"regexflag"`
 	} `cmd:"" help:"Download the test artifacts from the GCS bucket into ~/cache/prowdig. Not all artifacts are downloaded, only the ones that match the regex given with --regex."`
 	Tests struct {
@@ -115,25 +115,25 @@ var CLI struct {
 		} `cmd:"" help:"Parse the Ginkgo failure blocks from a given file or URL."`
 
 		List struct {
-			Limit      int    `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+			Limit      int    `help:"Limit the number of Prow builds for which we fetch the logs in the GCS bucket." default:"20"`
 			Name       string `help:"Only list tests for which the name contains the given string."`
 			OnlyFailed bool   `help:"Hide tests that have the status 'passed' or 'error'."`
 		} `cmd:"" help:"Lists all the test results ordered by name. The logs are fetched from the bucket."`
 
 		MaxDuration struct {
-			Limit      int  `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+			Limit      int  `help:"Limit the number of Prow builds for which we fetch the logs in the GCS bucket." default:"20"`
 			NoDownload bool `help:"Only use the local cache, do not download anything from the GCS bucket."`
 		} `cmd:"" help:"Lists the maximum 'passed' duration vs. maximum 'failed' duration of each test order by name. The logs are fetched from the bucket."`
 
 		MostFailures struct {
-			Limit      int  `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+			Limit      int  `help:"Limit the number of Prow builds for which we fetch the logs in the GCS bucket." default:"20"`
 			NoDownload bool `help:"Only use the local cache, do not download anything from the GCS bucket."`
 		} `cmd:"" help:"Lists the test names that fail the most. Two numbers are shown: the count of passed and the count of failed tests. The last error message is shown right after the test name. The list is sorted in descending order by the count of failed tests."`
 	} `cmd:"" help:"Everything related to individual test cases."`
 	Jobs struct {
 		Output string `help:"Output format. Can be either 'text' or 'json'." short:"o" default:"text" enum:"text,json"`
 		List   struct {
-			Limit int `help:"Limit the number of PRs for which we fetch the logs in the GCS bucket." default:"20"`
+			Limit int `help:"Limit the number of Prow builds for which we fetch the logs in the GCS bucket." default:"20"`
 		} `cmd:"" help:"Lists all the jobs."`
 	} `cmd:"" help:"Everything related to jobs."`
 	NoDownload bool   `help:"If a command is meant to fetch from GCS, only use the local cache, do not download anything."`
@@ -144,6 +144,7 @@ var CLI struct {
 func main() {
 	kongctx := kong.Parse(&CLI,
 		kong.Description("Prowdig copies the logs from the Google Storage buckets in which the cert-manager logs are contained to ~/.cache/prowdig and then tells you things about the Prow jobs, e.g., the most failing jobs. The folder ~/.cache/prowdig is not configurable for now. It may grow bigger than 10GB if you set a high --limit."),
+
 		kong.ValueFormatter(func(value *kong.Value) string {
 			switch value.Name {
 			case "regex":
@@ -987,9 +988,9 @@ type BuildResult struct {
 
 // The "bucket" string in input is used for displaying and logging. It is not
 // used to fetch anything from GCS.
-func parseBuildsFromCache(bucketPrefixes []string, countBuilds int) ([]BuildResult, error) {
+func parseBuildsFromCache(bucketPrefixes []string, limit int) ([]BuildResult, error) {
 	// Let's only select the last few PRs.
-	artifacts, err := findCachedArtifacts(bucketPrefixes, countBuilds)
+	artifacts, err := findCachedArtifacts(bucketPrefixes, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find cached artifacts: %v", err)
 	}
