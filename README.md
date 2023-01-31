@@ -1,5 +1,8 @@
 # Prow dig
 
+> **🚧 prowdig does not support Ginkgo v2 logs yet. Ginkgo v2's output format drastically changed, meaning
+> that a lot of the parser needs to be re-written. 🚧**
+
 Dig into Prow logs of cert-manager to find which test cases have a timeout too
 high compared to the "passed" runs of that test. You must have read access to the
 bucket `gs://jetstack-logs` in order to run prowdig. To log in to the bucket, run:
