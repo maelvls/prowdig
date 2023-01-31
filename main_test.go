@@ -1,12 +1,80 @@
 package main
 
 import (
+	"embed"
+	"io"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/onsi/gomega/gbytes"
+	"github.com/onsi/gomega/gexec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+//go:embed test/*.txt
+var fs embed.FS
+
+func Test_CLI_tests_parse_logs(t *testing.T) {
+	// We want to fake the behavior of the URL
+	// https://storage.googleapis.com/jetstack-logs/logs/ci-cert-manager-master-e2e-v1-21/1561754583443705856/build-log.txt
+	// so that we can test the behavior of "prowdig tests parse-logs https://storage.googleapis.com/...".
+
+	serve := func(w http.ResponseWriter, r *http.Request) {
+		t.Log(r.URL.Path, r.Method, r.Host)
+		if r.URL.Path != "/jetstack-logs/logs/ci-cert-manager-master-e2e-v1-21/1561754583443705856/build-log.txt" || r.Method != "GET" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		f, err := fs.Open("test/build-log.txt")
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(err.Error()))
+			return
+		}
+		defer f.Close()
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, err = io.Copy(w, f)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(serve))
+	defer server.Close()
+
+	bincli := withBinary(t)
+	cli := startWith(t, exec.Command(bincli, "tests", "parse-logs", server.URL+"/jetstack-logs/logs/ci-cert-manager-master-e2e-v1-21/1561754583443705856/build-log.txt")).Wait()
+	assert.Equal(t, 0, cli.ProcessState.ExitCode())
+
+	assert.Equal(t, `❌ 55s [Conformance] CertificateSigningRequests CertificateSigningRequest with issuer type Vault AppRole ClusterIssuer With Root CA should issue an RSA certificate for a single Common Name: failed to create vault issuer
+Internal error occurred: failed calling webhook "webhook.cert-manager.io": failed to call webhook: Post "https://cert-manager-webhook.cert-manager.svc:443/mutate?timeout=10s": dial tcp 10.96.139.176:443: connect: connection refused
+❌ 1m2s [Conformance] CertificateSigningRequests CertificateSigningRequest with issuer type Vault AppRole Issuer With Root CA should issue a certificate that includes only a URISANs name: failed to create vault issuer
+Internal error occurred: failed calling webhook "webhook.cert-manager.io": failed to call webhook: Post "https://cert-manager-webhook.cert-manager.svc:443/validate?timeout=10s": context deadline exceeded
+❌ 37s [Conformance] CertificateSigningRequests CertificateSigningRequest with issuer type Vault AppRole Issuer With Root CA should issue a certificate that includes only a URISANs name: failed to create vault issuer
+Internal error occurred: failed calling webhook "webhook.cert-manager.io": failed to call webhook: Post "https://cert-manager-webhook.cert-manager.svc:443/mutate?timeout=10s": dial tcp 10.96.139.176:443: connect: connection refused
+❌ 1s [Conformance] Certificates with issuer type ACME DNS01 Issuer should issue a certificate for a single distinct DNS Name defined by an ingress with annotations: failed to create acme DNS01 Issuer
+Internal error occurred: failed calling webhook "webhook.cert-manager.io": failed to call webhook: Post "https://cert-manager-webhook.cert-manager.svc:443/mutate?timeout=10s": dial tcp 10.96.139.176:443: connect: connection refused
+❌ 8s  [cert-manager] Certificate SecretTemplate should add Annotations and Labels to the Secret when the Certificate's SecretTemplate is updated, then remove Annotations and Labels when removed from the SecretTemplate: Operation cannot be fulfilled on certificates.cert-manager.io "test-secret-template-zpbwh": the object has been modified; please apply your changes to the latest version and try again
+❌ 7s  [cert-manager] Certificate SecretTemplate should add Annotations and Labels to the Secret when the Certificate's SecretTemplate is updated, then remove Annotations and Labels when removed from the SecretTemplate: Operation cannot be fulfilled on certificates.cert-manager.io "test-secret-template-cd7cx": the object has been modified; please apply your changes to the latest version and try again
+❌ 34s [cert-manager] Certificate SecretTemplate should not remove Annotations and Labels which have been added by a third party and not present in the SecretTemplate: failed to wait for Certificate to become Ready
+timed out waiting for the condition
+❌ 37s [cert-manager] Certificate SecretTemplate should not remove Annotations and Labels which have been added by a third party and not present in the SecretTemplate: failed to wait for Certificate to become Ready
+timed out waiting for the condition
+❌ 42s [cert-manager] Vault Issuer Certificate (AppRole, CA with root) should generate a new certificate with a warning event when renewBefore is bigger than the duration: Internal error occurred: failed calling webhook "webhook.cert-manager.io": failed to call webhook: Post "https://cert-manager-webhook.cert-manager.svc:443/mutate?timeout=10s": dial tcp 10.96.139.176:443: connect: connection refused
+`, contents(cli.Output))
+}
 
 func Test_reGinkgoBlock(t *testing.T) {
 	block, err := parseGinkgoBlock(ginkgoBlock{line: 42, lines: strings.Split(exampleGingkoBlock1, "\n")})
@@ -600,4 +668,80 @@ func Test_computeStatsMostFailures(t *testing.T) {
 			Build:    14578011101239,
 		}},
 	}}, got)
+}
+
+func withBinary(t *testing.T) string {
+	start := time.Now()
+
+	bincli, err := gexec.Build("github.com/maelvls/prowdig")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		gexec.Terminate()
+		gexec.CleanupBuildArtifacts()
+	})
+
+	t.Logf("compiling binaries took %v, path: %s", time.Since(start).Truncate(time.Second), bincli)
+	return bincli
+}
+
+type e2ecmd struct {
+	*exec.Cmd
+	Output *gbytes.Buffer // Both stdout and stderr.
+	T      *testing.T
+}
+
+func (cmd *e2ecmd) Wait() *e2ecmd {
+	_ = cmd.Cmd.Wait()
+	return cmd
+}
+
+type writeLogger struct {
+	prefix string
+	w      io.Writer
+}
+
+func (l *writeLogger) Write(p []byte) (n int, err error) {
+	n, err = l.w.Write(p)
+	if err != nil {
+		log.Printf("%s %s: %v", l.prefix, string(p[0:n]), err)
+	} else {
+		log.Printf("%s %s", l.prefix, string(p[0:n]))
+	}
+	return
+}
+
+// createWriterLoggerStr returns a writer that behaves like w except that it
+// logs (using log.Printf) each write to standard error, printing the
+// prefix and the data written as a string.
+//
+// Pretty much the same as iotest.NewWriterLogger except it logs strings,
+// not hexadecimal jibberish.
+func createWriterLoggerStr(prefix string, w io.Writer) io.Writer {
+	return &writeLogger{prefix, w}
+}
+
+// Runs the passed command and make sure SIGTERM is called on cleanup. Also
+// dumps stderr and stdout using log.Printf.
+func startWith(t *testing.T, cmd *exec.Cmd) *e2ecmd {
+	buff := gbytes.NewBuffer()
+	cmd.Stdout = createWriterLoggerStr("stdout", buff)
+	cmd.Stderr = createWriterLoggerStr("stderr", buff)
+
+	err := cmd.Start()
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+	})
+
+	return &e2ecmd{Cmd: cmd, Output: buff, T: t}
+}
+
+func contents(f io.Reader) string {
+	bytes, err := ioutil.ReadAll(f)
+	if err != nil {
+		panic(err)
+	}
+	return string(bytes)
 }

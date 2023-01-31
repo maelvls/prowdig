@@ -32,9 +32,59 @@ import (
 )
 
 var (
-	bucketName     = "jetstack-logs"
-	bucketPrefixes = []string{"pr-logs/pull/jetstack_cert-manager", "pr-logs/pull/cert-manager_cert-manager"}
-	cacheDir       = os.Getenv("HOME") + "/.cache/prowdig/" + bucketName
+	bucketName = "jetstack-logs"
+
+	// In order to find which jobs are currently running in Prow:
+	//
+	//  curl -s https://prow.build-infra.jetstack.net/prowjobs.js\?var\=allBuilds\&omit\=annotations | sed -e 's/^var allBuilds = //' -e 's/;$//g' | jq '.items[].status.url | select(.)' -r | sed 's@https://prow.build-infra.jetstack.net/view/gs/jetstack-logs/@@' | grep ^logs/ci- | sed 's@/[0-9]*$@@' | sort | uniq
+
+	prBucketPrefixes = []string{
+		"pr-logs/pull/cert-manager_cert-manager",
+		"pr-logs/pull/jetstack_cert-manager",
+	}
+
+	ciBucketPrefixes = []string{
+		"logs/ci-cert-manager-e2e-feature-gates-disabled-v1-20",
+		"logs/ci-cert-manager-e2e-feature-gates-disabled-v1-21",
+		"logs/ci-cert-manager-e2e-feature-gates-disabled-v1-22",
+		"logs/ci-cert-manager-e2e-feature-gates-disabled-v1-23",
+		"logs/ci-cert-manager-e2e-feature-gates-disabled-v1-24",
+		"logs/ci-cert-manager-e2e-v1-20",
+		"logs/ci-cert-manager-e2e-v1-21",
+		"logs/ci-cert-manager-e2e-v1-22",
+		"logs/ci-cert-manager-e2e-v1-23",
+		"logs/ci-cert-manager-e2e-v1-24",
+		"logs/ci-cert-manager-make-test",
+		"logs/ci-cert-manager-next-e2e-v1-20",
+		"logs/ci-cert-manager-next-e2e-v1-21",
+		"logs/ci-cert-manager-next-e2e-v1-22",
+		"logs/ci-cert-manager-next-e2e-v1-23",
+		"logs/ci-cert-manager-next-e2e-v1-24",
+		"logs/ci-cert-manager-next-make-test",
+		"logs/ci-cert-manager-next-upgrade",
+		"logs/ci-cert-manager-next-venafi",
+		"logs/ci-cert-manager-previous-bazel",
+		"logs/ci-cert-manager-previous-e2e-feature-gates-disabled-v1-18",
+		"logs/ci-cert-manager-previous-e2e-feature-gates-disabled-v1-19",
+		"logs/ci-cert-manager-previous-e2e-feature-gates-disabled-v1-20",
+		"logs/ci-cert-manager-previous-e2e-feature-gates-disabled-v1-21",
+		"logs/ci-cert-manager-previous-e2e-feature-gates-disabled-v1-22",
+		"logs/ci-cert-manager-previous-e2e-feature-gates-disabled-v1-23",
+		"logs/ci-cert-manager-previous-e2e-feature-gates-disabled-v1-24",
+		"logs/ci-cert-manager-previous-e2e-v1-18",
+		"logs/ci-cert-manager-previous-e2e-v1-19",
+		"logs/ci-cert-manager-previous-e2e-v1-20",
+		"logs/ci-cert-manager-previous-e2e-v1-21",
+		"logs/ci-cert-manager-previous-e2e-v1-22",
+		"logs/ci-cert-manager-previous-e2e-v1-23",
+		"logs/ci-cert-manager-previous-e2e-v1-24",
+		"logs/ci-cert-manager-previous-upgrade",
+		"logs/ci-cert-manager-previous-venafi",
+		"logs/ci-cert-manager-upgrade",
+		"logs/ci-cert-manager-venafi",
+	}
+
+	cacheDir = os.Getenv("HOME") + "/.cache/prowdig/" + bucketName
 
 	endsWithPRNumber    = regexp.MustCompile(`/(\d+)/?$`)
 	rmAnsiColors        = regexp.MustCompile(`\x1B\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]`)
@@ -130,11 +180,11 @@ var CLI struct {
 			NoDownload bool `help:"Only use the local cache, do not download anything from the GCS bucket."`
 		} `cmd:"" help:"Lists the test names that fail the most. Two numbers are shown: the count of passed and the count of failed tests. The last error message is shown right after the test name. The list is sorted in descending order by the count of failed tests."`
 	} `cmd:"" help:"Everything related to individual test cases."`
-	Jobs struct {
+	Builds struct {
 		Output string `help:"Output format. Can be either 'text' or 'json'." short:"o" default:"text" enum:"text,json"`
 		List   struct {
 			Limit int `help:"Limit the number of Prow builds for which we fetch the logs in the GCS bucket." default:"20"`
-		} `cmd:"" help:"Lists all the jobs."`
+		} `cmd:"" help:"Lists all the builds."`
 	} `cmd:"" help:"Everything related to jobs."`
 	NoDownload bool   `help:"If a command is meant to fetch from GCS, only use the local cache, do not download anything."`
 	Color      string `help:"Change the coloring behavior. Can be one of auto, never, or always." enum:"auto,never,always" default:"auto"`
@@ -181,7 +231,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		err = downloadBuildArtifactsToCache(bucketName, CLI.Download.Limit, regex)
+		err = downloadCIBuildArtifactsToCache(CLI.Download.Limit, regex)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
 			os.Exit(1)
@@ -199,6 +249,10 @@ func main() {
 			bytes, err = ioutil.ReadAll(content.Body)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "reading HTTP response: %v\n", err)
+			}
+
+			if CLI.Debug {
+				fmt.Fprintf(os.Stderr, "debug: downloaded %s\n", ByteCountSI(int64(len(bytes))))
 			}
 
 			if content.StatusCode != 200 {
@@ -280,14 +334,14 @@ func main() {
 
 	case "tests max-duration":
 		if !CLI.NoDownload {
-			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit, isToBeDownloaded)
+			err := downloadPRBuildArtifactsToCache(CLI.Tests.List.Limit, isToBeDownloaded)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
 				os.Exit(1)
 			}
 		}
 
-		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefixes, CLI.Tests.MaxDuration.Limit)
+		results, err := parseGinkgoResultsFromCache(ciBucketPrefixes, CLI.Tests.MaxDuration.Limit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
 			os.Exit(1)
@@ -323,14 +377,14 @@ func main() {
 
 	case "tests most-failures":
 		if !CLI.NoDownload {
-			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.MostFailures.Limit, isToBeDownloaded)
+			err := downloadPRBuildArtifactsToCache(CLI.Tests.MostFailures.Limit, isToBeDownloaded)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
 				os.Exit(1)
 			}
 		}
 
-		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefixes, CLI.Tests.MostFailures.Limit)
+		results, err := parseGinkgoResultsFromCache(ciBucketPrefixes, CLI.Tests.MostFailures.Limit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
 			os.Exit(1)
@@ -371,14 +425,14 @@ func main() {
 
 	case "tests list":
 		if !CLI.NoDownload {
-			err := downloadBuildArtifactsToCache(bucketName, CLI.Tests.List.Limit, isToBeDownloaded)
+			err := downloadPRBuildArtifactsToCache(CLI.Tests.List.Limit, isToBeDownloaded)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download job artifacts: %v\n", err)
 				os.Exit(1)
 			}
 		}
 
-		results, err := parseGinkgoResultsFromCache(bucketName, bucketPrefixes, CLI.Tests.List.Limit)
+		results, err := parseGinkgoResultsFromCache(ciBucketPrefixes, CLI.Tests.List.Limit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to fetch ginkgo results from files: %v\n", err)
 			os.Exit(1)
@@ -436,20 +490,20 @@ func main() {
 
 	case "jobs list":
 		if !CLI.NoDownload {
-			err := downloadBuildArtifactsToCache(bucketName, CLI.Jobs.List.Limit, regexp.MustCompile(`prowjob\.json$`))
+			err := downloadPRBuildArtifactsToCache(CLI.Builds.List.Limit, regexp.MustCompile(`prowjob\.json$`))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to download build artifacts: %v\n", err)
 				os.Exit(1)
 			}
 		}
 
-		results, err := parseBuildsFromCache(bucketPrefixes, CLI.Jobs.List.Limit)
+		results, err := parseBuildsFromCache(ciBucketPrefixes, CLI.Builds.List.Limit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to fetch build results from files: %v\n", err)
 			os.Exit(1)
 		}
 
-		switch CLI.Jobs.Output {
+		switch CLI.Builds.Output {
 		case "json":
 			if results == nil {
 				// Force the encoded JSON to show "[]" instead of "null".
@@ -483,22 +537,22 @@ func main() {
 
 // One ginkgo block looks like this:
 //
-//   • Failure [301.437 seconds]                          ^
-//   [Conformance] Certificates                           |
-//   test/e2e/framework/framework.go:287                  |
+//   - Failure [301.437 seconds]                          ^
+//     [Conformance] Certificates                           |
+//     test/e2e/framework/framework.go:287                  |
 //     with issuer type External ClusterIssuer            |
 //     test/e2e/suite/conformance/certificates.go:47      |
-//       should issue a cert with wildcard DNS Name [It]  |
-//       test/e2e/suite/conformance/certificates.go:105   |
-//       Unexpected error:                                |
-//                                                        | "lines"
-//           <*errors.errorString | 0xc0001c07b0>: {      |
-//               s: "timed out waiting for the condition",|
-//           }                                            |
-//           timed out waiting for the condition          |
-//       occurred                                         |
-//       test/e2e/suite/conformance/certificates.go:522   |
-//   ------------------------------                       v
+//     should issue a cert with wildcard DNS Name [It]  |
+//     test/e2e/suite/conformance/certificates.go:105   |
+//     Unexpected error:                                |
+//     | "lines"
+//     <*errors.errorString | 0xc0001c07b0>: {      |
+//     s: "timed out waiting for the condition",|
+//     }                                            |
+//     timed out waiting for the condition          |
+//     occurred                                         |
+//     test/e2e/suite/conformance/certificates.go:522   |
+//     ------------------------------                       v
 type ginkgoBlock struct {
 	// Line number of the first line of the Ginkgo block as it appears in the
 	// build-log.txt file.
@@ -708,7 +762,7 @@ func parseGinkgoBlock(block ginkgoBlock) (parsedGinkgoBlock, error) {
 	return parsedGinkgoBlock{name: name, status: status, duration: duration, errStr: strings.Join(errStr, "\n"), errLoc: errLoc}, nil
 }
 
-// downloadBuildArtifactsToCache is a slow function that reads the Google
+// downloadPRBuildArtifactsToCache is a slow function that reads the Google
 // Storage bucket, and downloads the files found in the bucket onto your
 // disk in the hardcoded directory ~/.cache/prowdig.
 //
@@ -718,45 +772,45 @@ func parseGinkgoBlock(block ginkgoBlock) (parsedGinkgoBlock, error) {
 // better the "limit" parameter, let us see what happens when we list
 // builds using gsutil:
 //
-//     gsutil ls "gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/**" | grep "build-log\.txt$"
-//                     <-----------> <------------------------------------>
-//                      bucket name               bucket prefix
+//	gsutil ls "gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/**" | grep "build-log\.txt$"
+//	                <-----------> <------------------------------------>
+//	                 bucket name               bucket prefix
 //
 // The output is:
 //
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
-//                                                                                            <----------------->
-//                                                                                                build number
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
+//	                                                                                       <----------------->
+//	                                                                                           build number
 //
-// Using downloadBuildArtifactsToCache with the regex is "build-log\.txt$",
+// Using downloadPRBuildArtifactsToCache with the regex is "build-log\.txt$",
 // and the bucket is "jetstack-logs", you will see the following files
 // downloaded to ~/.cache/prowdig:
 //
-//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
-//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
-//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
-//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
-//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
-//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
+//	~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+//	~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
+//	~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
+//	~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+//	~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
+//	~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
 //
 // With limit=2, then only the last two build numbers get downloaded:
 //
-//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
-//     ~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+//	~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+//	~/.config/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
 //
 // For example, the last item of that list will be found at the path:
 //
-//   ~/.cache/prowdig/jetstack-logs/pr-logs/pull/jetstack_cert-manager/2/pull-cert-manager-e2e-v1-13/245/build-log.txt
-//   <--------------> <----------->
-//       hardcoded     bucket name
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/jetstack_cert-manager/2/pull-cert-manager-e2e-v1-13/245/build-log.txt
+//	<--------------> <----------->
+//	    hardcoded     bucket name
 //
 // The filter can be left nil.
-func downloadBuildArtifactsToCache(bucketName string, limit int, filter *regexp.Regexp) error {
+func downloadPRBuildArtifactsToCache(limit int, filter *regexp.Regexp) error {
 	gcs, err := storage.NewClient(context.Background())
 	if err != nil {
 		return fmt.Errorf("error: Google Cloud storage: %v\n", err)
@@ -778,7 +832,7 @@ func downloadBuildArtifactsToCache(bucketName string, limit int, filter *regexp.
 			time.Sleep(200 * time.Millisecond)
 		}
 	}()
-	prPrefixes, err := listPRPrefixes(bucket, bucketPrefixes)
+	prPrefixes, err := listPRPrefixes(bucket, ciBucketPrefixes)
 	if err != nil {
 		return fmt.Errorf("failed to list PR prefixes: %v", err)
 	}
@@ -864,9 +918,391 @@ func downloadBuildArtifactsToCache(bucketName string, limit int, filter *regexp.
 	return nil
 }
 
+// Because the ci-cert-manager-* jobs have a very different layout in the
+// Google Storage bucket, the download logic is a bit different.
+//
+// More specifically, because of the lexicographical sorting limitation of
+// Google Storage, we have to list the builds for each of the "prefixes".
+// The prefixes are hardcoded. They look a bit like this:
+//
+//	logs/ci-cert-manager-e2e-v1-23
+//	logs/ci-cert-manager-e2e-v1-24
+//	logs/ci-cert-manager-make-test
+//	logs/ci-cert-manager-next-e2e-v1-23
+//	logs/ci-cert-manager-next-e2e-v1-24
+//	logs/ci-cert-manager-next-make-test
+//	logs/ci-cert-manager-next-upgrade
+//	logs/ci-cert-manager-next-venafi
+//	logs/ci-cert-manager-previous-bazel
+//	logs/ci-cert-manager-previous-e2e-feature-gates-disabled-v1-23
+//	logs/ci-cert-manager-previous-e2e-feature-gates-disabled-v1-24
+//	logs/ci-cert-manager-previous-e2e-v1-23
+//	logs/ci-cert-manager-previous-e2e-v1-24
+func downloadCIBuildArtifactsToCache(limit int, filter *regexp.Regexp) error {
+	// There are thousands of build artifacts in the Google Storage bucket.
+	// We use the --limit=N flag to only show the latest ones.
+	// Unfortunately, the Google Storage API doesn't help us getting the
+	// "latest" builds. By latest builds, we would mean the list of the
+	// latest N builds where one build means one build number such as
+	// 1542425759740596224. For example, on 15 June 2022, the 10 "latest"
+	// builds would be:
+	//
+	//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
+	//     gs://jetstack-logs/logs/ci-cert-manager-previous-e2e-v1-21/1542420807551909888/build-log.txt
+	//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
+	//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
+	//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
+	//     gs://jetstack-logs/logs/ci-cert-manager-next-e2e-v1-23/1542796006737842176/build-log.txt
+	//     gs://jetstack-logs/logs/ci-cert-manager-upgrade/1542886604610211840/build-log.txt
+	//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+	//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+	//     gs://jetstack-logs/logs/ci-cert-manager-previous-e2e-v1-24/1542916860926758912/build-log.txt
+	//     gs://jetstack-logs/logs/ci-cert-manager-previous-e2e-v1-24/1542947060200771584/build-log.txt
+	//     gs://jetstack-logs/logs/ci-cert-manager-previous-e2e-v1-24/1542977259508338688/build-log.txt
+	//
+	// Unfortunately, the Google Storage API doesn't help us in getting the
+	// "latest" build-log.txt entries. The Google Storage API always lists
+	// entries in a lexiographic order, and cannot sort them by time, and
+	// the only way to filter files is by using "prefix string". There is
+	// no way to use a wildcard in the middle of the search query (or
+	// rather, it is possible, but it is terribly slow). For example, the
+	// following query takes approximately 10 minutes:
+	//
+	//     gsutil ls "gs://jetstack-logs/pr-logs/**/build-log.txt"
+	//
+	// In order to get the latest entries, we would need to wait until the
+	// end of these 10 minutes, which is totally impractical.
+	//
+	// Thus, we use a heuristic to get the latest entries. We have two
+	// heuristics:
+	//
+	// (1) PULL REQUESTS BUILDS
+	//
+	// We start by listing the "PR prefixes". Listing the "PR prefixes"
+	// look like this:
+	//
+	//     $ gsutil ls gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager
+	//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5288/
+	//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5289/
+	//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5291/
+	//
+	// Then, starting with the PR number the highest, we list the builds,
+	// and we stop until --limit is reached. Imagining we have --limit=10,
+	// we start looking at 5291:
+	//
+	//    $ gsutil ls "gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5291/**/build-log.txt"
+	//    gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5288/pull-cert-manager-chart/1546506710615592960/build-log.txt
+	//    gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5288/pull-cert-manager-e2e-v1-24/1546506710665924608/build-log.txt
+	//    gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5288/pull-cert-manager-make-test/1546506710544289792/build-log.txt
+	//    gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5288/pull-cert-manager-upgrade/1546506710804336640/build-log.txt
+	//
+	// Since we only got 3 entries, we still need to find 7 more entries,
+	// so we do the same for 5289, and so on.
+	//
+	// This heuristic is not perfect since it does not actually list the
+	// "latest" builds, but rather the latest builds considering the latest
+	// PRs, but this heuristic is good enough and it is fast.
+	//
+	//
+	// (2) PERIODIC BUILDS
+	//
+	// The periodic builds are all the jobs that start with
+	// "ci-cert-manager-". The heuristic is to only list the builds inside
+	// the "latest" jobs and to ignore the old and unused jobs. That gives
+	// us 94 jobs to go over:
+	//
+	//     $ gsutil ls gs://jetstack-logs/logs | grep ci-cert-manager
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-feature-gates-disabled-v1-18/
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-feature-gates-disabled-v1-19-previous/
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-feature-gates-disabled-v1-24-previous/
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-feature-gates-disabled-v1-24/
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-v1-21/
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-v1-22/
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-v1-23/
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-v1-24/
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-v1-7/
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-v1-8/
+	//     gs://jetstack-logs/logs/ci-cert-manager-e2e-v1-9/
+	//     gs://jetstack-logs/logs/ci-cert-manager-next-bazel/
+	//     gs://jetstack-logs/logs/ci-cert-manager-next-e2e-v1-11/
+	//     gs://jetstack-logs/logs/ci-cert-manager-next-e2e-v1-12/
+	//     gs://jetstack-logs/logs/ci-cert-manager-next-e2e-v1-13/
+	//     gs://jetstack-logs/logs/ci-cert-manager-next-e2e-v1-22/
+	//     gs://jetstack-logs/logs/ci-cert-manager-next-e2e-v1-23/
+	//     gs://jetstack-logs/logs/ci-cert-manager-previous-e2e-v1-11/
+	//     gs://jetstack-logs/logs/ci-cert-manager-previous-e2e-v1-12/
+	//     ...
+	//
+	// Our heuristic chooses the
+
+	// We need to "filter" the ProwJobs by the prefix of the GCS bucket.
+	//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
+
+	//   gsutil ls gs://jetstack-logs/logs/ci-cert-manager-previous-e2e-v1-20/latest-build.txt
+	//
+	//
+	url := "https://prow.build-infra.jetstack.net/prowjobs.js?var=allBuilds"
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to list the latest builds from prow.build-infra.jetstack.net: %w", err)
+	}
+	defer resp.Body.Close()
+
+	type ProwJob struct {
+		Kind       string `json:"kind"`
+		APIVersion string `json:"apiVersion"`
+		Metadata   struct {
+			Name              string    `json:"name"`
+			Namespace         string    `json:"namespace"`
+			UID               string    `json:"uid"`
+			ResourceVersion   string    `json:"resourceVersion"`
+			Generation        int       `json:"generation"`
+			CreationTimestamp time.Time `json:"creationTimestamp"`
+			Labels            struct {
+				CreatedByProw                         string `json:"created-by-prow"`
+				PresetCloudflareCredentials           string `json:"preset-cloudflare-credentials"`
+				PresetDefaultE2EVolumes               string `json:"preset-default-e2e-volumes"`
+				PresetDindEnabled                     string `json:"preset-dind-enabled"`
+				PresetEnableAllFeatureGatesDisableSsa string `json:"preset-enable-all-feature-gates-disable-ssa"`
+				PresetGinkgoSkipDefault               string `json:"preset-ginkgo-skip-default"`
+				PresetMakeVolumes                     string `json:"preset-make-volumes"`
+				PresetServiceAccount                  string `json:"preset-service-account"`
+				ProwK8SIoBuildID                      string `json:"prow.k8s.io/build-id"`
+				ProwK8SIoContext                      string `json:"prow.k8s.io/context"`
+				ProwK8SIoID                           string `json:"prow.k8s.io/id"`
+				ProwK8SIoJob                          string `json:"prow.k8s.io/job"`
+				ProwK8SIoRefsBaseRef                  string `json:"prow.k8s.io/refs.base_ref"`
+				ProwK8SIoRefsOrg                      string `json:"prow.k8s.io/refs.org"`
+				ProwK8SIoRefsRepo                     string `json:"prow.k8s.io/refs.repo"`
+				ProwK8SIoType                         string `json:"prow.k8s.io/type"`
+			} `json:"labels"`
+			Annotations struct {
+				Description             string `json:"description"`
+				ProwK8SIoContext        string `json:"prow.k8s.io/context"`
+				ProwK8SIoJob            string `json:"prow.k8s.io/job"`
+				TestgridAlertEmail      string `json:"testgrid-alert-email"`
+				TestgridCreateTestGroup string `json:"testgrid-create-test-group"`
+				TestgridDashboards      string `json:"testgrid-dashboards"`
+			} `json:"annotations"`
+		} `json:"metadata"`
+		Spec struct {
+			Type      string `json:"type"`
+			Agent     string `json:"agent"`
+			Cluster   string `json:"cluster"`
+			Namespace string `json:"namespace"`
+			Job       string `json:"job"`
+			ExtraRefs []struct {
+				Org     string `json:"org"`
+				Repo    string `json:"repo"`
+				BaseRef string `json:"base_ref"`
+			} `json:"extra_refs"`
+			Report  bool `json:"report"`
+			PodSpec struct {
+				Volumes []struct {
+					Name   string `json:"name"`
+					Secret struct {
+						SecretName string `json:"secretName"`
+					} `json:"secret,omitempty"`
+					EmptyDir struct {
+					} `json:"emptyDir,omitempty"`
+					HostPath struct {
+						Path string `json:"path"`
+						Type string `json:"type"`
+					} `json:"hostPath,omitempty"`
+				} `json:"volumes"`
+				Containers []struct {
+					Name  string   `json:"name"`
+					Image string   `json:"image"`
+					Args  []string `json:"args"`
+					Env   []struct {
+						Name      string `json:"name"`
+						Value     string `json:"value,omitempty"`
+						ValueFrom struct {
+							SecretKeyRef struct {
+								Name string `json:"name"`
+								Key  string `json:"key"`
+							} `json:"secretKeyRef"`
+						} `json:"valueFrom,omitempty"`
+					} `json:"env"`
+					Resources struct {
+						Requests struct {
+							CPU    string `json:"cpu"`
+							Memory string `json:"memory"`
+						} `json:"requests"`
+					} `json:"resources"`
+					VolumeMounts []struct {
+						Name      string `json:"name"`
+						ReadOnly  bool   `json:"readOnly,omitempty"`
+						MountPath string `json:"mountPath"`
+					} `json:"volumeMounts"`
+					SecurityContext struct {
+						Capabilities struct {
+							Add []string `json:"add"`
+						} `json:"capabilities"`
+						Privileged bool `json:"privileged"`
+					} `json:"securityContext"`
+				} `json:"containers"`
+				DNSConfig struct {
+					Options []struct {
+						Name  string `json:"name"`
+						Value string `json:"value"`
+					} `json:"options"`
+				} `json:"dnsConfig"`
+			} `json:"pod_spec"`
+			DecorationConfig struct {
+				Timeout       string `json:"timeout"`
+				GracePeriod   string `json:"grace_period"`
+				UtilityImages struct {
+					Clonerefs  string `json:"clonerefs"`
+					Initupload string `json:"initupload"`
+					Entrypoint string `json:"entrypoint"`
+					Sidecar    string `json:"sidecar"`
+				} `json:"utility_images"`
+				GcsConfiguration struct {
+					Bucket       string `json:"bucket"`
+					PathStrategy string `json:"path_strategy"`
+					DefaultOrg   string `json:"default_org"`
+					DefaultRepo  string `json:"default_repo"`
+				} `json:"gcs_configuration"`
+				GcsCredentialsSecret string `json:"gcs_credentials_secret"`
+			} `json:"decoration_config"`
+			ProwjobDefaults struct {
+				TenantID string `json:"tenant_id"`
+			} `json:"prowjob_defaults"`
+		} `json:"spec"`
+		Status struct {
+			StartTime        time.Time `json:"startTime"`
+			PendingTime      time.Time `json:"pendingTime"`
+			State            string    `json:"state"`
+			Description      string    `json:"description"`
+			URL              string    `json:"url"`
+			PodName          string    `json:"pod_name"`
+			BuildID          string    `json:"build_id"`
+			PrevReportStates struct {
+				Gcsk8Sreporter string `json:"gcsk8sreporter"`
+				Gcsreporter    string `json:"gcsreporter"`
+			} `json:"prev_report_states"`
+		} `json:"status"`
+	}
+
+	bytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// The response from prow.k8s.io is a JavaScript blob that can be
+	// interpreted. We need to turn it into JSON. The blob looks like this:
+	//
+	//   var allBuilds = {"items":[{"kind":"ProwJob", ...}]};
+	//   <------------->                                    ^
+	//    remove this                                    remove this
+	//
+	regex := regexp.MustCompile(`var allBuilds = {"items":(.*)};`)
+	match := regex.FindStringSubmatch(string(bytes))
+	if len(match) != 2 {
+		return fmt.Errorf(`the body was expected to look like '{"items":[{"kind":"ProwJob", ...}]};' but it was '%s'`, string(bytes))
+	}
+
+	var builds []ProwJob
+	err = json.Unmarshal([]byte(match[1]), &builds)
+	if err != nil {
+		return fmt.Errorf("while unmarshalling the ProwJob JSON object: %w", err)
+	}
+
+	if len(builds) == 0 {
+		return fmt.Errorf("no ProwJobs found, please check the body returned by ")
+	}
+
+	buildIDPrefix := builds[len(builds)-1].Status.BuildID[:3]
+
+	gcs, err := storage.NewClient(context.Background())
+	if err != nil {
+		return fmt.Errorf("error: Google Cloud storage: %v\n", err)
+	}
+	bucket := gcs.Bucket(bucketName)
+
+	// Now, let's list the files under each CI prefix.
+	var objects []storage.ObjectAttrs
+	totalSize := int64(0)
+
+	bar2 := pb.NewOptions(limit,
+		pb.OptionSetWriter(os.Stderr),
+		pb.OptionSetPredictTime(false),
+		pb.OptionEnableColorCodes(true),
+		pb.OptionShowBytes(false),
+		pb.OptionSetDescription(fmt.Sprintf("Finding the last %d jobs...", limit)),
+		pb.OptionSetTheme(theme),
+	)
+	_ = bar2.RenderBlank()
+	countJobs := 0 // One prowjob.json = one build.
+	for _, prefix := range ciBucketPrefixes {
+		objectIter := bucket.Objects(context.Background(), &storage.Query{
+			Prefix: prefix + "/" + buildIDPrefix, Projection: storage.ProjectionNoACL,
+		})
+
+		for countJobs < limit {
+			object, err := objectIter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("failed to iterate over GCS objects: %s: %w", object.Name, err)
+			}
+
+			if strings.HasSuffix(object.Name, "prowjob.json") {
+				countJobs++
+				_ = bar2.Add(1)
+			}
+
+			if filter != nil && !filter.MatchString(object.Name) {
+				continue
+			}
+
+			totalSize += object.Size
+
+			// Why "*object"? No one else is going to touch the
+			// *storage.ObjectAttrs pointer, so it makes sense to do a shallow
+			// copy here since all the "shared" fields like object.Metadata
+			// won't be used by anyone else.
+			objects = append(objects, *object)
+
+		}
+		if countJobs >= limit {
+			break
+		}
+	}
+	_ = bar2.Finish()
+	_ = bar2.Clear()
+
+	bar3 := pb.NewOptions64(totalSize,
+		pb.OptionSetWriter(os.Stderr),
+		pb.OptionSetPredictTime(true),
+		pb.OptionShowCount(),
+		pb.OptionEnableColorCodes(true),
+		pb.OptionShowBytes(true),
+		pb.OptionSetDescription("Downloading logs for each job..."),
+		pb.OptionSetTheme(theme),
+	)
+	_ = bar3.RenderBlank()
+	for _, object := range objects {
+		if CLI.Debug {
+			fmt.Fprintf(os.Stderr, "downloading %s\n", object.Name)
+		}
+		err := downloadToCache(&object, bucket)
+		if err != nil {
+			return fmt.Errorf("failed to download jobs artifacts for %s: %w", object.Name, err)
+		}
+		_ = bar3.Add64(object.Size)
+	}
+	_ = bar3.Finish()
+	_ = bar3.Clear()
+
+	return nil
+}
+
 // The "bucket" string in input is used for displaying and logging. It is not
 // used to fetch anything from GCS.
-func parseGinkgoResultsFromCache(bucketName string, bucketPrefixes []string, countBuilds int) ([]GinkgoResult, error) {
+func parseGinkgoResultsFromCache(bucketPrefixes []string, countBuilds int) ([]GinkgoResult, error) {
 	// Let's only select the last few PRs.
 	artifacts, err := findCachedArtifacts(bucketPrefixes, countBuilds)
 	if err != nil {
@@ -1149,51 +1585,50 @@ func parseBuildsFromCache(bucketPrefixes []string, limit int) ([]BuildResult, er
 // builds. For example, "pr-logs/pull/cert-manager_cert-manager" is a valid
 // bucket prefix that you could use to list builds:
 //
-//     gsutil ls "gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/**"
-//                                   <------------------------------------>
-//                                                bucket prefix
+//	gsutil ls "gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/**"
+//	                              <------------------------------------>
+//	                                           bucket prefix
 //
 // Just for the sake of completeness, this gsutil command returns something
 // like this:
 //
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_bazel.xml
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_make-test-ci.xml
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/latest-build.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/artifacts/junit_bazel.xml
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/artifacts/junit_bazel.xml
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/artifacts/junit_bazel.xml
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/latest-build.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/artifacts/junit_bazel.xml
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/artifacts/junit_bazel.xml
-//     gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
-//                                                               <-->                         <----------------->
-//                                                             pr number                          build number
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_bazel.xml
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_make-test-ci.xml
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/latest-build.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/artifacts/junit_bazel.xml
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/artifacts/junit_bazel.xml
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/artifacts/junit_bazel.xml
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/latest-build.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/artifacts/junit_bazel.xml
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/artifacts/junit_bazel.xml
+//	gs://jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
+//	                                                          <-->                         <----------------->
+//	                                                        pr number                          build number
 //
 // In the case of findCachedArtifacts, imagining that the above artifacts
 // were previously downloaded by downloadBuildArtifactsToCache, then the
 // following paths get returned:
 //
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_bazel.xml
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_make-test-ci.xml
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/latest-build.txt
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/artifacts/junit_bazel.xml
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/artifacts/junit_bazel.xml
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/artifacts/junit_bazel.xml
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/latest-build.txt
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/artifacts/junit_bazel.xml
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/artifacts/junit_bazel.xml
-//     ~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
-//
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_bazel.xml
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/artifacts/junit_make-test-ci.xml
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/1542891685103538176/build-log.txt
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-make-test/latest-build.txt
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/artifacts/junit_bazel.xml
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542425759740596224/build-log.txt
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/artifacts/junit_bazel.xml
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542438055447629824/build-log.txt
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/artifacts/junit_bazel.xml
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/1542891685250338816/build-log.txt
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5250/pull-cert-manager-upgrade/latest-build.txt
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/artifacts/junit_bazel.xml
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542472529862463488/build-log.txt
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/artifacts/junit_bazel.xml
+//	~/.cache/prowdig/jetstack-logs/pr-logs/pull/cert-manager_cert-manager/5251/pull-cert-manager-chart/1542474955155836928/build-log.txt
 func findCachedArtifacts(bucketPrefixes []string, countBuilds int) ([]string, error) {
 	var prDirs []string
 	for _, bucketPrefix := range bucketPrefixes {
@@ -1407,17 +1842,17 @@ func parseJunit(bytes []byte) ([]parsedGinkgoBlock, error) {
 // corresponds to the string that you would give to gsutil in order to list all
 // the PRs; the ending "/" is optional:
 //
-//  gsutil ls gs://jetstack-logs/pr-logs/pull/jetstack_cert-manager
-//                 <--bucket---> <----------- prefix ------------->
+//	gsutil ls gs://jetstack-logs/pr-logs/pull/jetstack_cert-manager
+//	               <--bucket---> <----------- prefix ------------->
 //
 // The returned strings are ordered numerically by descreasing order and look
 // like this:
 //
-//  pr-logs/pull/jetstack_cert-manager/20/
-//  pr-logs/pull/jetstack_cert-manager/10/
-//  pr-logs/pull/jetstack_cert-manager/2/
-//  pr-logs/pull/jetstack_cert-manager/1/
-//  <----------- prefix ------------->
+//	pr-logs/pull/jetstack_cert-manager/20/
+//	pr-logs/pull/jetstack_cert-manager/10/
+//	pr-logs/pull/jetstack_cert-manager/2/
+//	pr-logs/pull/jetstack_cert-manager/1/
+//	<----------- prefix ------------->
 func listPRPrefixes(bucket *storage.BucketHandle, prefixes []string) ([]string, error) {
 	for i := range prefixes {
 		if !strings.HasSuffix(prefixes[i], "/") {
@@ -1503,7 +1938,7 @@ func sortNumericDesc(prPrefixes []string) ([]string, error) {
 // Get an object from the cache. No checksum is performed. It is assumed that
 // downloadToCache was previously run. The name is expected to look like this:
 //
-//  pr-logs/pull/jetstack_cert-manager/1/build-log.txt
+//	pr-logs/pull/jetstack_cert-manager/1/build-log.txt
 func loadFromCache(filePath string) ([]byte, error) {
 	bytes, err := ioutil.ReadFile(filePath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1558,9 +1993,9 @@ func downloadToCache(object *storage.ObjectAttrs, bucket *storage.BucketHandle) 
 	return nil
 }
 
-//  pr-logs/pull/jetstack_cert-manager/4664/pull-cert-manager-e2e-v1-13/14356/artifacts/junit__01.xml
-//                                     <--> <-------------------------> <--->
-// 									 pr number        job name       build number
+//	 pr-logs/pull/jetstack_cert-manager/4664/pull-cert-manager-e2e-v1-13/14356/artifacts/junit__01.xml
+//	                                    <--> <-------------------------> <--->
+//										 pr number        job name       build number
 func parseObjectName(objectName string) (pr int, job string, build int, err error) {
 	matches := reObjectName.FindStringSubmatch(objectName)
 	if len(matches) != 4 {
@@ -1580,4 +2015,18 @@ func parseObjectName(objectName string) (pr int, job string, build int, err erro
 	}
 
 	return pr, job, build, nil
+}
+
+func ByteCountSI(b int64) string {
+	const unit = 1000
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB",
+		float64(b)/float64(div), "kMGTPE"[exp])
 }
